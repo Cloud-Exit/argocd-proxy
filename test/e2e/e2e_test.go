@@ -72,8 +72,8 @@ func setup() error {
 
 func teardown() {
 	fmt.Println("=== Tearing down ===")
-	run("kind", "delete", "cluster", "--name", mgmtCluster)
-	run("kind", "delete", "cluster", "--name", workloadCluster)
+	_ = run("kind", "delete", "cluster", "--name", mgmtCluster)
+	_ = run("kind", "delete", "cluster", "--name", workloadCluster)
 }
 
 // ---------- Test cases ----------
@@ -91,7 +91,7 @@ func TestProxyAPIAccess(t *testing.T) {
 	if err := pf.Start(); err != nil {
 		t.Fatalf("port-forward: %v", err)
 	}
-	defer pf.Process.Kill()
+	defer func() { _ = pf.Process.Kill() }()
 
 	// Wait for port-forward to be ready.
 	time.Sleep(3 * time.Second)
@@ -133,7 +133,7 @@ func TestHealthEndpoint(t *testing.T) {
 	if err := pf.Start(); err != nil {
 		t.Fatalf("port-forward: %v", err)
 	}
-	defer pf.Process.Kill()
+	defer func() { _ = pf.Process.Kill() }()
 	time.Sleep(3 * time.Second)
 
 	out, err := runOutput("curl", "-sf", "--max-time", "5", "http://127.0.0.1:18081/healthz")
@@ -156,7 +156,7 @@ func TestReadyEndpoint(t *testing.T) {
 	if err := pf.Start(); err != nil {
 		t.Fatalf("port-forward: %v", err)
 	}
-	defer pf.Process.Kill()
+	defer func() { _ = pf.Process.Kill() }()
 	time.Sleep(3 * time.Second)
 
 	out, err := runOutput("curl", "-sf", "--max-time", "5", "http://127.0.0.1:18082/readyz")
@@ -179,6 +179,9 @@ func buildImages() error {
 }
 
 func createClusters() error {
+	// Both clusters must share a Docker network so the agent can reach the
+	// management cluster's NodePort. Kind defaults to the "kind" network
+	// but we pass it explicitly to be safe across kind versions.
 	if err := run("kind", "create", "cluster", "--name", mgmtCluster, "--wait", "60s"); err != nil {
 		return err
 	}
@@ -267,8 +270,11 @@ func deployAgent() error {
 	// Get the management cluster's API server address accessible from the
 	// workload cluster. Since both are kind clusters on the same Docker
 	// network, we use the management cluster's control plane container IP.
+	// Use the "kind" network IP specifically. The range template would
+	// concatenate all network IPs without a separator if the container is
+	// on multiple networks.
 	mgmtIP, err := runOutput("docker", "inspect", "-f",
-		"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+		"{{(index .NetworkSettings.Networks \"kind\").IPAddress}}",
 		mgmtCluster+"-control-plane")
 	if err != nil {
 		return fmt.Errorf("get mgmt IP: %w", err)
@@ -358,17 +364,39 @@ func waitForReady() error {
 		return fmt.Errorf("agent not ready: %w", err)
 	}
 
-	// Wait for agent to connect (check readyz).
-	deadline := time.Now().Add(30 * time.Second)
+	// Wait for agent to connect. The server container is distroless (no
+	// shell/wget), so we port-forward and check /readyz from the test host.
+	pfCtx, pfCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer pfCancel()
+
+	pf := exec.CommandContext(pfCtx, "kubectl", "--context", "kind-"+mgmtCluster,
+		"-n", namespace, "port-forward", "svc/proxy-server", "18090:8080")
+	pf.Stdout = os.Stdout
+	pf.Stderr = os.Stderr
+	if err := pf.Start(); err != nil {
+		return fmt.Errorf("port-forward: %w", err)
+	}
+	defer func() { _ = pf.Process.Kill() }()
+
+	// Wait for port-forward to establish.
+	time.Sleep(2 * time.Second)
+
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
-		out, err := runOutput("kubectl", "--context", "kind-"+mgmtCluster, "-n", namespace,
-			"exec", "deploy/proxy-server", "--", "wget", "-qO-", "http://localhost:8080/readyz")
+		out, err := runOutput("curl", "-sf", "--max-time", "2", "http://127.0.0.1:18090/readyz")
 		if err == nil && strings.TrimSpace(out) == "ok" {
 			return nil
 		}
 		time.Sleep(2 * time.Second)
 	}
-	return fmt.Errorf("agent did not connect within timeout")
+
+	// Dump logs for debugging on failure.
+	serverLogs, _ := runOutput("kubectl", "--context", "kind-"+mgmtCluster,
+		"-n", namespace, "logs", "-l", "app=proxy-server", "--tail=50")
+	agentLogs, _ := runOutput("kubectl", "--context", "kind-"+workloadCluster,
+		"-n", namespace, "logs", "-l", "app=proxy-agent", "--tail=50")
+	return fmt.Errorf("agent did not connect within timeout\nserver logs:\n%s\nagent logs:\n%s",
+		serverLogs, agentLogs)
 }
 
 func applyManifest(kubeContext, manifest string) error {
