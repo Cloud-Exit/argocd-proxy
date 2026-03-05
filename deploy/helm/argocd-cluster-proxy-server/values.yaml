@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/cloud-exit/argocd-cluster-proxy-server
+  repository: ghcr.io/cloud-exit/argocd-proxy-server
   tag: ""  # defaults to appVersion
   pullPolicy: IfNotPresent
 
