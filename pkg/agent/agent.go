@@ -278,7 +278,7 @@ func (a *Agent) readSAToken() (string, error) {
 
 func (a *Agent) buildTLSConfig() (*tls.Config, error) {
 	if a.cfg.Insecure {
-		return &tls.Config{InsecureSkipVerify: true}, nil //nolint:gosec // user-requested
+		return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, nil //nolint:gosec // user-requested
 	}
 
 	caCert, err := os.ReadFile(a.cfg.CACertPath)

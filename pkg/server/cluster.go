@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"sync"
 
@@ -51,16 +52,22 @@ type ClusterConfig struct {
 
 // Authenticate validates the token using constant-time comparison and returns
 // the cluster ID, or empty string if invalid. [C1 fix: timing-safe auth]
+//
+// Tokens are hashed to a fixed length before comparison so that
+// subtle.ConstantTimeCompare always operates on equal-length inputs and the
+// function always iterates all clusters to avoid early-return timing leaks.
 func (r *Registry) Authenticate(token string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	tokenBytes := []byte(token)
+	tokenHash := sha256.Sum256([]byte(token))
+	var matched string
 	for _, c := range r.clusters {
-		if subtle.ConstantTimeCompare(tokenBytes, []byte(c.Token)) == 1 {
-			return c.ID
+		cHash := sha256.Sum256([]byte(c.Token))
+		if subtle.ConstantTimeCompare(tokenHash[:], cHash[:]) == 1 {
+			matched = c.ID
 		}
 	}
-	return ""
+	return matched
 }
 
 // Attach binds a tunnel session to a cluster.

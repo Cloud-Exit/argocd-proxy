@@ -30,19 +30,32 @@ type Session struct {
 	// handlerWg tracks active OnConnect goroutines for graceful draining.
 	handlerWg sync.WaitGroup
 
+	// connSem limits concurrent OnConnect handlers (nil = unlimited).
+	connSem chan struct{}
+
+	// lastPong stores the UnixNano timestamp of the last pong received.
+	lastPong atomic.Int64
+
 	log *slog.Logger
 }
+
+// DefaultMaxConns is the default maximum number of concurrent tunnel
+// connections per session.
+const DefaultMaxConns = 1024
 
 // NewSession wraps a WebSocket connection into a tunnel session.
 func NewSession(ws *websocket.Conn, logger *slog.Logger) *Session {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Session{
-		ws:     ws,
-		closed: make(chan struct{}),
-		log:    logger,
+	s := &Session{
+		ws:      ws,
+		closed:  make(chan struct{}),
+		connSem: make(chan struct{}, DefaultMaxConns),
+		log:     logger,
 	}
+	s.lastPong.Store(time.Now().UnixNano())
+	return s
 }
 
 // Serve runs the read loop, dispatching incoming messages to the appropriate
@@ -83,11 +96,18 @@ func (s *Session) Serve(ctx context.Context) error {
 		switch msg.Type {
 		case MsgConnect:
 			if s.OnConnect != nil {
-				s.handlerWg.Add(1)
-				go func(id uint32, addr string) {
-					defer s.handlerWg.Done()
-					s.OnConnect(s, id, addr)
-				}(msg.ConnID, string(msg.Data))
+				select {
+				case s.connSem <- struct{}{}:
+					s.handlerWg.Add(1)
+					go func(id uint32, addr string) {
+						defer func() { <-s.connSem }()
+						defer s.handlerWg.Done()
+						s.OnConnect(s, id, addr)
+					}(msg.ConnID, string(msg.Data))
+				default:
+					s.log.Warn("max concurrent connections reached, rejecting", "connID", msg.ConnID)
+					_ = s.SendError(msg.ConnID, "too many connections")
+				}
 			}
 
 		case MsgConnected:
@@ -120,7 +140,7 @@ func (s *Session) Serve(ctx context.Context) error {
 			_ = s.sendMsg(Message{Type: MsgPong})
 
 		case MsgPong:
-			// keepalive acknowledged
+			s.lastPong.Store(time.Now().UnixNano())
 		}
 	}
 }
@@ -230,8 +250,13 @@ func (s *Session) SendError(connID uint32, msg string) error {
 	return s.sendMsg(Message{Type: MsgError, ConnID: connID, Data: []byte(msg)})
 }
 
+const (
+	pingInterval = 15 * time.Second
+	pongTimeout  = 45 * time.Second // 3x ping interval
+)
+
 func (s *Session) pingLoop(ctx context.Context) {
-	t := time.NewTicker(15 * time.Second)
+	t := time.NewTicker(pingInterval)
 	defer t.Stop()
 	for {
 		select {
@@ -240,6 +265,14 @@ func (s *Session) pingLoop(ctx context.Context) {
 		case <-s.closed:
 			return
 		case <-t.C:
+			// Detect dead peers: if no pong received within pongTimeout,
+			// close the session.
+			last := time.Unix(0, s.lastPong.Load())
+			if time.Since(last) > pongTimeout {
+				s.log.Warn("pong timeout, closing session", "last_pong", last)
+				s.Close()
+				return
+			}
 			if err := s.sendMsg(Message{Type: MsgPing}); err != nil {
 				return
 			}

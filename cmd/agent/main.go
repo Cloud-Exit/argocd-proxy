@@ -99,7 +99,7 @@ func main() {
 			}
 		})
 		healthMux.Handle("/metrics", promhttp.Handler())
-		healthSrv := &http.Server{Addr: *healthAddr, Handler: healthMux}
+		healthSrv := &http.Server{Addr: *healthAddr, Handler: healthMux, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if herr := healthSrv.ListenAndServe(); herr != nil && herr != http.ErrServerClosed {
 				logger.Error("health server", "err", herr)

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func TestAgentRejectsPlaintextByDefault(t *testing.T) {
 }
 
 func TestAgentReconnect(t *testing.T) {
-	var connectCount int
+	var connectCount atomic.Int32
 	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,8 +44,8 @@ func TestAgentReconnect(t *testing.T) {
 		if err != nil {
 			return
 		}
-		connectCount++
-		if connectCount == 1 {
+		n := connectCount.Add(1)
+		if n == 1 {
 			ws.Close()
 			return
 		}
@@ -71,13 +72,13 @@ func TestAgentReconnect(t *testing.T) {
 
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		if connectCount >= 2 {
+		if connectCount.Load() >= 2 {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if connectCount < 2 {
-		t.Errorf("expected at least 2 connections, got %d", connectCount)
+	if connectCount.Load() < 2 {
+		t.Errorf("expected at least 2 connections, got %d", connectCount.Load())
 	}
 	cancel()
 }

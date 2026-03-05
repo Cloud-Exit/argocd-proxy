@@ -230,7 +230,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
 	proxy.ServeHTTP(rec, r)
-	metrics.ProxyRequestsTotal.WithLabelValues(clusterID, r.Method, fmt.Sprintf("%d", rec.code)).Inc()
+	metrics.ProxyRequestsTotal.WithLabelValues(clusterID, normalizeMethod(r.Method), fmt.Sprintf("%d", rec.code)).Inc()
 	metrics.ProxyRequestDuration.WithLabelValues(clusterID).Observe(time.Since(start).Seconds())
 }
 
@@ -250,7 +250,11 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request, cluster *
 	outReq.URL.Host = cluster.TargetAddr
 	outReq.Host = cluster.TargetAddr
 	outReq.RequestURI = outReq.URL.RequestURI()
+	// Preserve upgrade headers across hop-by-hop stripping.
+	upgrade := outReq.Header.Get("Upgrade")
 	stripHopByHopHeaders(outReq.Header)
+	outReq.Header.Set("Connection", "Upgrade")
+	outReq.Header.Set("Upgrade", upgrade)
 	// Strip Authorization — the agent injects its own SA token.
 	outReq.Header.Del("Authorization")
 	if err := outReq.Write(tunnelConn); err != nil {
@@ -303,6 +307,19 @@ func parseClusterPath(path string) (clusterID, remaining string) {
 	return path[:idx], path[idx:]
 }
 
+// normalizeMethod returns the HTTP method if it is a known standard method,
+// or "OTHER" to prevent unbounded Prometheus label cardinality.
+func normalizeMethod(m string) string {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodConnect,
+		http.MethodOptions, http.MethodTrace:
+		return m
+	default:
+		return "OTHER"
+	}
+}
+
 func isUpgradeRequest(r *http.Request) bool {
 	for _, v := range r.Header["Connection"] {
 		if strings.EqualFold(v, "upgrade") {
@@ -312,13 +329,26 @@ func isUpgradeRequest(r *http.Request) bool {
 	return false
 }
 
-// stripHopByHopHeaders removes headers that must not transit a proxy.
+// stripHopByHopHeaders removes headers that must not transit a proxy per
+// RFC 7230 Section 6.1, including any custom hop-by-hop headers declared in
+// the Connection header.
 func stripHopByHopHeaders(h http.Header) {
+	// Parse the Connection header for dynamically-declared hop-by-hop headers.
+	for _, v := range h["Connection"] {
+		for _, key := range strings.Split(v, ",") {
+			if k := strings.TrimSpace(key); k != "" {
+				h.Del(k)
+			}
+		}
+	}
 	for _, key := range []string{
+		"Connection",
+		"Keep-Alive",
 		"Proxy-Authorization",
 		"Proxy-Connection",
 		"Te",
 		"Trailer",
+		"Transfer-Encoding",
 	} {
 		h.Del(key)
 	}
@@ -337,6 +367,13 @@ func (r *statusRecorder) WriteHeader(code int) {
 		r.wroteHeader = true
 	}
 	r.ResponseWriter.WriteHeader(code)
+}
+
+// Flush implements http.Flusher for streaming response support (e.g. kubectl logs -f).
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // ListenAndServe starts the proxy server. It blocks until the context is
