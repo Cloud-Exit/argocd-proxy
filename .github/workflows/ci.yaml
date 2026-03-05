@@ -28,7 +28,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test -race -count=1 -timeout 5m ./pkg/...
+      - run: go test -v -race -count=1 -timeout 5m ./pkg/...
       - run: go build ./cmd/server/
       - run: go build ./cmd/agent/
 
@@ -59,4 +59,4 @@ jobs:
           docker build -t argocd-cluster-proxy-server:e2e -f Dockerfile.server .
           docker build -t argocd-cluster-proxy-agent:e2e -f Dockerfile.agent .
       - name: Run e2e tests
-        run: go test -count=1 -timeout 10m -tags e2e ./test/e2e/
+        run: go test -v -count=1 -timeout 10m -tags e2e ./test/e2e/

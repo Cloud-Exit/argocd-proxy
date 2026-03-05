@@ -11,6 +11,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  # docker/metadata-action lowercases automatically, but be explicit.
   SERVER_IMAGE: ghcr.io/${{ github.repository }}-server
   AGENT_IMAGE: ghcr.io/${{ github.repository }}-agent
 
@@ -86,9 +87,10 @@ jobs:
 
       - name: Push charts to GHCR
         run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
           for pkg in dist/argocd-cluster-proxy-*.tgz; do
-            helm push "${pkg}" oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+            helm push "${pkg}" oci://${{ env.REGISTRY }}/${OWNER}/charts
           done
 
       - name: Upload chart artifacts
