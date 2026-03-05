@@ -1,0 +1,15 @@
+apiVersion: v2
+name: argocd-cluster-proxy-server
+description: Management-cluster component of argocd-cluster-proxy — accepts agent tunnels and proxies ArgoCD requests
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - argocd
+  - kubernetes
+  - proxy
+  - tunnel
+  - air-gapped
+  - multi-cluster
+maintainers:
+  - name: Cloud Exit B.V.

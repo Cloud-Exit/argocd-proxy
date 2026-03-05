@@ -1,0 +1,83 @@
+image:
+  repository: ghcr.io/cloud-exit/argocd-cluster-proxy-agent
+  tag: ""  # defaults to appVersion
+  pullPolicy: IfNotPresent
+
+replicas: 1
+logLevel: info
+
+# -- REQUIRED: WebSocket URL of the proxy server.
+# Example: wss://proxy.management.example.com/connect
+serverURL: ""
+
+# -- REQUIRED: Pre-shared authentication token from the management cluster.
+# This is the only value you need to provide — everything else is automatic.
+token: ""
+# existingSecret: ""  # alternative: name of existing Secret with key "token"
+
+# -- Target Kubernetes API address inside this cluster.
+targetAddr: "kubernetes.default.svc:443"
+
+# -- Path to the ServiceAccount token injected into proxied requests.
+# The agent reads this on every request to support automatic K8s token rotation.
+# Kubernetes automatically mounts this via the projected volume below.
+saTokenPath: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+# -- Skip TLS verification to the local Kubernetes API.
+insecure: false
+
+# -- Max reconnection backoff interval.
+maxRetryInterval: "60s"
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# -- Port for the agent health/metrics HTTP server.
+healthPort: 8081
+
+pdb:
+  enabled: false
+  minAvailable: 1
+
+topologySpreadConstraints: []
+  # - maxSkew: 1
+  #   topologyKey: kubernetes.io/hostname
+  #   whenUnsatisfiable: DoNotSchedule
+  #   labelSelector:
+  #     matchLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+
+# -- ServiceAccount for the agent. This SA's token is what authenticates
+# requests to the local Kubernetes API on behalf of ArgoCD.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# -- RBAC rules that define what ArgoCD can do on this cluster via the proxy.
+# The agent's ServiceAccount token is injected into all proxied requests, so
+# these rules control ArgoCD's effective permissions.
+rbac:
+  create: true
+  # -- Use a ClusterRole (full cluster scope) vs a namespaced Role.
+  clusterWide: true
+  # -- Default: full access (cluster-admin equivalent) so ArgoCD can manage
+  # all resources. Restrict in production as needed.
+  rules:
+    - apiGroups: ["*"]
+      resources: ["*"]
+      verbs: ["*"]
+    - nonResourceURLs: ["*"]
+      verbs: ["*"]
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""

@@ -1,0 +1,66 @@
+image:
+  repository: ghcr.io/cloud-exit/argocd-cluster-proxy-server
+  tag: ""  # defaults to appVersion
+  pullPolicy: IfNotPresent
+
+replicas: 1
+port: 8080
+logLevel: info
+
+# -- Bearer token required on /tunnel/ proxy requests. ArgoCD cluster secrets
+# include this token so ArgoCD can authenticate to the proxy.
+# REQUIRED in production. Set via --set proxyToken=<secret> or use
+# existingProxyTokenSecret to reference an existing Secret.
+proxyToken: ""
+existingProxyTokenSecret: ""  # name of Secret with key "proxy-token"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+metricsPort: 0  # set to e.g. 9090 to expose a separate metrics port (0 = metrics on main port)
+
+pdb:
+  enabled: false
+  minAvailable: 1
+
+topologySpreadConstraints: []
+  # - maxSkew: 1
+  #   topologyKey: kubernetes.io/hostname
+  #   whenUnsatisfiable: DoNotSchedule
+  #   labelSelector:
+  #     matchLabels: {}  # auto-filled from selectorLabels
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# -- Cluster definitions. Each entry allows an agent with the matching token
+# to connect and (optionally) creates an ArgoCD cluster secret.
+clusters: []
+  # - id: customer-a
+  #   token: "<random-token>"
+  #   targetAddr: "kubernetes.default.svc:443"  # optional, used by server for dial
+
+# -- ArgoCD integration: create cluster secrets in the ArgoCD namespace so
+# ArgoCD can target proxied clusters automatically.
+argocd:
+  enabled: false
+  namespace: argocd  # namespace where ArgoCD is installed
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
