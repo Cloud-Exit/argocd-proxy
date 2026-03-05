@@ -132,7 +132,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if !s.registry.Attach(clusterID, sess) {
 		log.Warn("unknown cluster id after auth")
 		metrics.AgentsConnected.Dec()
-		ws.Close()
+		_ = ws.Close()
 		return
 	}
 
@@ -242,7 +242,7 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request, cluster *
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
-	defer tunnelConn.Close()
+	defer func() { _ = tunnelConn.Close() }()
 
 	// Rewrite and forward the original request through the tunnel.
 	outReq := r.Clone(r.Context())
@@ -273,12 +273,12 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request, cluster *
 		s.log.Error("hijack", "err", err)
 		return
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Flush any buffered client data.
 	if clientBuf != nil && clientBuf.Reader.Buffered() > 0 {
 		buf := make([]byte, clientBuf.Reader.Buffered())
-		n, _ := clientBuf.Reader.Read(buf)
+		n, _ := clientBuf.Read(buf)
 		if n > 0 {
 			_, _ = tunnelConn.Write(buf[:n])
 		}

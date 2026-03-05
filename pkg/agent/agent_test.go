@@ -46,11 +46,11 @@ func TestAgentReconnect(t *testing.T) {
 		}
 		n := connectCount.Add(1)
 		if n == 1 {
-			ws.Close()
+			_ = ws.Close()
 			return
 		}
 		sess := tunnel.NewSession(ws, nil)
-		sess.Serve(r.Context())
+		_ = sess.Serve(r.Context())
 	}))
 	defer srv.Close()
 
@@ -68,7 +68,7 @@ func TestAgentReconnect(t *testing.T) {
 		t.Fatalf("new agent: %v", err)
 	}
 
-	go a.Run(ctx)
+	go func() { _ = a.Run(ctx) }()
 
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
@@ -88,16 +88,16 @@ func TestAgentDialsLocalTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echoLn.Close()
+	defer func() { _ = echoLn.Close() }()
 
 	go func() {
 		for {
-			conn, err := echoLn.Accept()
-			if err != nil {
+			conn, acceptErr := echoLn.Accept()
+			if acceptErr != nil {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				buf := make([]byte, 4096)
 				n, _ := c.Read(buf)
 				_, _ = c.Write(buf[:n])
@@ -124,7 +124,7 @@ func TestAgentDialsLocalTarget(t *testing.T) {
 		AllowInsecureServer: true,
 	}, nil)
 
-	go a.Run(ctx)
+	go func() { _ = a.Run(ctx) }()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {

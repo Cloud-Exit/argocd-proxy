@@ -80,7 +80,7 @@ func (r *Registry) Attach(clusterID string, sess *tunnel.Session) bool {
 	}
 	// Close existing session if any.
 	if c.session != nil {
-		c.session.Close()
+		_ = c.session.Close()
 	}
 	c.session = sess
 	return true

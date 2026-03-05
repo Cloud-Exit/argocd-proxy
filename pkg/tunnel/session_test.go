@@ -41,8 +41,8 @@ func wsConnPair(t *testing.T) (*websocket.Conn, *websocket.Conn, func()) {
 	<-ready
 
 	return serverConn, clientConn, func() {
-		clientConn.Close()
-		serverConn.Close()
+		_ = clientConn.Close()
+		_ = serverConn.Close()
 		srv.Close()
 	}
 }
@@ -61,7 +61,7 @@ func TestSessionDialAndPipe(t *testing.T) {
 	agentSess := tunnel.NewSession(clientWS, nil)
 	agentSess.OnConnect = func(sess *tunnel.Session, connID uint32, addr string) {
 		tunnelConn := sess.Accept(connID)
-		defer tunnelConn.Close()
+		defer func() { _ = tunnelConn.Close() }()
 		if err := sess.SendConnected(connID); err != nil {
 			return
 		}
@@ -82,8 +82,8 @@ func TestSessionDialAndPipe(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); serverSess.Serve(ctx) }()
-	go func() { defer wg.Done(); agentSess.Serve(ctx) }()
+	go func() { defer wg.Done(); _ = serverSess.Serve(ctx) }()
+	go func() { defer wg.Done(); _ = agentSess.Serve(ctx) }()
 
 	// Give sessions a moment to start their read loops.
 	time.Sleep(50 * time.Millisecond)
@@ -93,7 +93,7 @@ func TestSessionDialAndPipe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Write data and read the echo.
 	_, err = conn.Write([]byte("hello"))
@@ -127,7 +127,7 @@ func TestSessionMultipleConnections(t *testing.T) {
 	// Agent echoes back the connID as a string prefix.
 	agentSess.OnConnect = func(sess *tunnel.Session, connID uint32, addr string) {
 		tunnelConn := sess.Accept(connID)
-		defer tunnelConn.Close()
+		defer func() { _ = tunnelConn.Close() }()
 		_ = sess.SendConnected(connID)
 		buf := make([]byte, 4096)
 		n, err := tunnelConn.Read(buf)
@@ -139,8 +139,8 @@ func TestSessionMultipleConnections(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); serverSess.Serve(ctx) }()
-	go func() { defer wg.Done(); agentSess.Serve(ctx) }()
+	go func() { defer wg.Done(); _ = serverSess.Serve(ctx) }()
+	go func() { defer wg.Done(); _ = agentSess.Serve(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 
 	// Open 5 concurrent connections.
@@ -158,7 +158,7 @@ func TestSessionMultipleConnections(t *testing.T) {
 				t.Errorf("dial %d: %v", idx, err)
 				return
 			}
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			msg := []byte(strings.Repeat("x", idx+1))
 			if _, err := c.Write(msg); err != nil {
 				t.Errorf("write %d: %v", idx, err)
@@ -196,8 +196,8 @@ func TestSessionPingPong(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); serverSess.Serve(ctx) }()
-	go func() { defer wg.Done(); agentSess.Serve(ctx) }()
+	go func() { defer wg.Done(); _ = serverSess.Serve(ctx) }()
+	go func() { defer wg.Done(); _ = agentSess.Serve(ctx) }()
 
 	// Let ping/pong cycle at least once (ping interval is 15s in production,
 	// but we just verify the sessions stay alive for a short period).

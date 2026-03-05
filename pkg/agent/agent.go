@@ -214,10 +214,10 @@ func (a *Agent) handleConnect(sess *tunnel.Session, connID uint32, addr string) 
 		_ = sess.SendError(connID, "dial failed")
 		return
 	}
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 
 	tunnelConn := sess.Accept(connID)
-	defer tunnelConn.Close()
+	defer func() { _ = tunnelConn.Close() }()
 
 	_ = sess.SendConnected(connID)
 

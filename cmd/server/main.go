@@ -90,7 +90,7 @@ func loadClusters(path string) ([]server.ClusterConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var clusters []server.ClusterConfig
 	if err := json.NewDecoder(f).Decode(&clusters); err != nil {

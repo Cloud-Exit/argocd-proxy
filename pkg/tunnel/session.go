@@ -62,7 +62,7 @@ func NewSession(ws *websocket.Conn, logger *slog.Logger) *Session {
 // connection. It blocks until the WebSocket is closed or the context is
 // cancelled.
 func (s *Session) Serve(ctx context.Context) error {
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -70,7 +70,7 @@ func (s *Session) Serve(ctx context.Context) error {
 	// Close the WebSocket when context is cancelled so ReadMessage unblocks.
 	go func() {
 		<-ctx.Done()
-		s.Close()
+		_ = s.Close()
 	}()
 
 	// Ping loop.
@@ -210,7 +210,7 @@ func (s *Session) Close() error {
 			s.conns.Delete(key)
 			return true
 		})
-		s.ws.Close()
+		_ = s.ws.Close()
 	})
 	return nil
 }
@@ -270,7 +270,7 @@ func (s *Session) pingLoop(ctx context.Context) {
 			last := time.Unix(0, s.lastPong.Load())
 			if time.Since(last) > pongTimeout {
 				s.log.Warn("pong timeout, closing session", "last_pong", last)
-				s.Close()
+				_ = s.Close()
 				return
 			}
 			if err := s.sendMsg(Message{Type: MsgPing}); err != nil {

@@ -1,11 +1,11 @@
 module github.com/cloud-exit/argocd-cluster-proxy
 
-go 1.24.0
+go 1.23.0
 
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/prometheus/client_golang v1.23.2
-	golang.org/x/time v0.14.0
+	golang.org/x/time v0.9.0
 )
 
 require (

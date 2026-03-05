@@ -34,9 +34,9 @@ func startHTTPEchoTarget(t *testing.T) (string, func()) {
 			_, _ = w.Write([]byte("path=" + r.URL.Path))
 		}),
 	}
-	go srv.Serve(ln)
+	go func() { _ = srv.Serve(ln) }()
 	return ln.Addr().String(), func() {
-		srv.Close()
+		_ = srv.Close()
 	}
 }
 
@@ -82,7 +82,7 @@ func TestEndToEndHTTPProxy(t *testing.T) {
 
 	agentCtx, agentCancel := context.WithCancel(ctx)
 	defer agentCancel()
-	go a.Run(agentCtx)
+	go func() { _ = a.Run(agentCtx) }()
 
 	waitForAgent(t, reg, 5*time.Second)
 
@@ -90,7 +90,7 @@ func TestEndToEndHTTPProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("proxy request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -126,7 +126,7 @@ func TestProxyTokenAuth(t *testing.T) {
 		PlainTarget:         true,
 		AllowInsecureServer: true,
 	}, nil)
-	go a.Run(ctx)
+	go func() { _ = a.Run(ctx) }()
 
 	waitForAgent(t, reg, 5*time.Second)
 
@@ -135,7 +135,7 @@ func TestProxyTokenAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("no-token status: got %d, want 401", resp.StatusCode)
 	}
@@ -148,7 +148,7 @@ func TestProxyTokenAuth(t *testing.T) {
 		t.Fatalf("request: %v", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("with-token status: got %d, want 200", resp.StatusCode)
 	}
@@ -184,7 +184,7 @@ func TestProxyTokenStrippedBeforeTunnel(t *testing.T) {
 		PlainTarget:         true,
 		AllowInsecureServer: true,
 	}, nil)
-	go a.Run(ctx)
+	go func() { _ = a.Run(ctx) }()
 
 	waitForAgent(t, reg, 5*time.Second)
 
@@ -198,7 +198,7 @@ func TestProxyTokenStrippedBeforeTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d, want 200", resp.StatusCode)
@@ -244,7 +244,7 @@ func TestAgentInjectsSAToken(t *testing.T) {
 		PlainTarget:         true,
 		AllowInsecureServer: true,
 	}, nil)
-	go a.Run(ctx)
+	go func() { _ = a.Run(ctx) }()
 
 	waitForAgent(t, reg, 5*time.Second)
 
@@ -252,7 +252,7 @@ func TestAgentInjectsSAToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d, want 200", resp.StatusCode)
@@ -312,7 +312,7 @@ func TestClusterNotConnected(t *testing.T) {
 		t.Fatalf("request: %v", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("status: got %d, want 502", resp.StatusCode)
@@ -333,13 +333,13 @@ func TestHealthEndpoints(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Errorf("healthz: got %d", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	resp, _ = http.Get(ts.URL + "/readyz")
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("readyz: got %d, want 503", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 func TestAgentSSRFBlocked(t *testing.T) {
@@ -355,8 +355,8 @@ func TestAgentSSRFBlocked(t *testing.T) {
 	evilSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("SSRF_SUCCESS"))
 	})}
-	go evilSrv.Serve(evilLn)
-	defer evilSrv.Close()
+	go func() { _ = evilSrv.Serve(evilLn) }()
+	defer func() { _ = evilSrv.Close() }()
 
 	// Configure server with evil address as the target (but agent only
 	// allows its own configured targetAddr).
@@ -380,7 +380,7 @@ func TestAgentSSRFBlocked(t *testing.T) {
 		PlainTarget:         true,
 		AllowInsecureServer: true,
 	}, nil)
-	go a.Run(ctx)
+	go func() { _ = a.Run(ctx) }()
 
 	waitForAgent(t, reg, 5*time.Second)
 
@@ -391,7 +391,7 @@ func TestAgentSSRFBlocked(t *testing.T) {
 		t.Fatalf("request: %v", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK && strings.Contains(string(body), "SSRF_SUCCESS") {
 		t.Fatal("SSRF succeeded: agent connected to non-target address")
@@ -425,7 +425,7 @@ func TestUpgradeRequestProxy(t *testing.T) {
 			if herr != nil {
 				return
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			// Write 101 response.
 			_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\r\n")
 			_ = buf.Flush()
@@ -442,8 +442,8 @@ func TestUpgradeRequestProxy(t *testing.T) {
 			}
 		}),
 	}
-	go upgradeSrv.Serve(upgradeLn)
-	defer upgradeSrv.Close()
+	go func() { _ = upgradeSrv.Serve(upgradeLn) }()
+	defer func() { _ = upgradeSrv.Close() }()
 
 	clusters := []server.ClusterConfig{
 		{ID: "upgrade-test", Token: "tok", TargetAddr: upgradeAddr},
@@ -467,7 +467,7 @@ func TestUpgradeRequestProxy(t *testing.T) {
 	if aerr != nil {
 		t.Fatalf("new agent: %v", aerr)
 	}
-	go a.Run(ctx)
+	go func() { _ = a.Run(ctx) }()
 	waitForAgent(t, reg, 5*time.Second)
 
 	// Send an upgrade request through the proxy.
@@ -476,7 +476,7 @@ func TestUpgradeRequestProxy(t *testing.T) {
 	if dialErr != nil {
 		t.Fatalf("dial proxy: %v", dialErr)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Write raw HTTP upgrade request.
 	reqStr := "GET /tunnel/upgrade-test/stream HTTP/1.1\r\n" +
@@ -522,7 +522,7 @@ func writeFile(path, content string) error {
 	}
 	_, err = f.WriteString(content)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	return f.Close()
