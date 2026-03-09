@@ -193,27 +193,29 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Parse path early so we can exempt discovery endpoints from auth.
+	clusterID, remainingPath := parseClusterPath(r.URL.Path)
+	if clusterID == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
 	// [C2 fix] Authenticate the proxy request.
-	if s.ProxyToken != "" {
+	// OpenAPI discovery paths are exempted because ArgoCD's client-go
+	// downloads /openapi/v2 and /openapi/v3 without sending the cluster
+	// bearer token (used for client-side dry-run validation). These are
+	// read-only schema endpoints; the agent still authenticates to the
+	// K8s API with its ServiceAccount token.
+	if s.ProxyToken != "" && !isOpenAPIDiscoveryPath(remainingPath) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(token), []byte(s.ProxyToken)) != 1 {
 			metrics.AuthFailuresTotal.WithLabelValues("proxy").Inc()
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		// Remove the proxy auth header so it doesn't leak to the target
-		// cluster. ArgoCD sends its own cluster-specific token which is
-		// forwarded separately via the X-Forwarded-Authorization header
-		// or by the caller re-adding it after proxy auth.
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, MaxProxyBodySize)
-
-	clusterID, remainingPath := parseClusterPath(r.URL.Path)
-	if clusterID == "" {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
 
 	cluster := s.registry.Get(clusterID)
 	if cluster == nil {
@@ -370,6 +372,13 @@ func normalizeMethod(m string) string {
 	default:
 		return "OTHER"
 	}
+}
+
+// isOpenAPIDiscoveryPath returns true for Kubernetes OpenAPI schema discovery
+// paths. These are exempted from proxy token auth because ArgoCD's client-go
+// fetches them without sending the cluster bearer token.
+func isOpenAPIDiscoveryPath(path string) bool {
+	return strings.HasPrefix(path, "/openapi/")
 }
 
 func isUpgradeRequest(r *http.Request) bool {

@@ -157,6 +157,65 @@ func TestProxyTokenAuth(t *testing.T) {
 	}
 }
 
+// TestOpenAPIBypassesProxyAuth verifies that OpenAPI discovery paths
+// (/openapi/v2, /openapi/v3) are allowed through without the proxy bearer
+// token. ArgoCD's client-go downloads these endpoints for client-side
+// validation without sending the cluster bearer token.
+func TestOpenAPIBypassesProxyAuth(t *testing.T) {
+	targetAddr, targetCleanup := startHTTPEchoTarget(t)
+	defer targetCleanup()
+
+	clusters := []server.ClusterConfig{
+		{ID: "c1", Token: "agent-token", TargetAddr: targetAddr},
+	}
+	reg := server.NewRegistry(clusters)
+	srv := server.New(reg, nil, server.WithProxyToken("proxy-secret"))
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/connect"
+	a, _ := agent.New(agent.Config{
+		ServerURL:           wsURL,
+		Token:               "agent-token",
+		TargetAddr:          targetAddr,
+		PlainTarget:         true,
+		AllowInsecureServer: true,
+	}, nil)
+	go func() { _ = a.Run(ctx) }()
+
+	waitForAgent(t, reg, 5*time.Second)
+
+	// OpenAPI paths should succeed WITHOUT the proxy token.
+	for _, path := range []string{"/openapi/v2", "/openapi/v3", "/openapi/v3/apis/apps/v1"} {
+		resp, err := http.Get(ts.URL + "/tunnel/c1" + path)
+		if err != nil {
+			t.Fatalf("request %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("%s: got %d, want 200", path, resp.StatusCode)
+		}
+		if !strings.Contains(string(body), "path="+path) {
+			t.Errorf("%s: unexpected body %q", path, string(body))
+		}
+	}
+
+	// Non-OpenAPI paths should still require the proxy token.
+	resp, err := http.Get(ts.URL + "/tunnel/c1/api/v1/pods")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("non-openapi without token: got %d, want 401", resp.StatusCode)
+	}
+}
+
 // TestProxyTokenStrippedBeforeTunnel verifies that the proxy token (or any
 // Authorization header from the caller) is NOT forwarded through the tunnel
 // to the target. The agent should be the only one injecting credentials.
