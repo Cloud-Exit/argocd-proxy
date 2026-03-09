@@ -51,6 +51,8 @@ jobs:
           push: true
           tags: ${{ steps.server-meta.outputs.tags }}
           labels: ${{ steps.server-meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
 
       - uses: docker/build-push-action@v6
         with:
@@ -59,6 +61,8 @@ jobs:
           push: true
           tags: ${{ steps.agent-meta.outputs.tags }}
           labels: ${{ steps.agent-meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
 
   helm:
     runs-on: ubuntu-latest

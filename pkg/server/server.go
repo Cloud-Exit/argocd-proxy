@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -260,6 +261,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			rw.WriteHeader(http.StatusBadGateway)
 			_, _ = rw.Write([]byte("bad gateway"))
 		},
+		// Route httputil's internal body-copy errors through our structured
+		// logger instead of Go's default log (which lacks JSON formatting).
+		ErrorLog: log.New(slogWriter{s.log, clusterID}, "", 0),
 	}
 
 	rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
@@ -438,6 +442,18 @@ func stripHopByHopHeaders(h http.Header) {
 	} {
 		h.Del(key)
 	}
+}
+
+// slogWriter adapts slog.Logger for use as an io.Writer so httputil.ReverseProxy's
+// internal body-copy errors go through our structured logger.
+type slogWriter struct {
+	logger    *slog.Logger
+	clusterID string
+}
+
+func (w slogWriter) Write(p []byte) (int, error) {
+	w.logger.Warn(strings.TrimSpace(string(p)), "cluster", w.clusterID)
+	return len(p), nil
 }
 
 // statusRecorder wraps http.ResponseWriter to capture the status code.
