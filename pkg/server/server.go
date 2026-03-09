@@ -201,12 +201,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// [C2 fix] Authenticate the proxy request.
-	// OpenAPI discovery paths are exempted because ArgoCD's client-go
-	// downloads /openapi/v2 and /openapi/v3 without sending the cluster
-	// bearer token (used for client-side dry-run validation). These are
-	// read-only schema endpoints; the agent still authenticates to the
-	// K8s API with its ServiceAccount token.
-	if s.ProxyToken != "" && !isOpenAPIDiscoveryPath(remainingPath) {
+	// Kubernetes API discovery paths are exempted because ArgoCD's
+	// internal kubectl/client-go code paths download OpenAPI schemas and
+	// API group listings without sending the cluster bearer token. These
+	// are read-only metadata endpoints; the agent still authenticates to
+	// the K8s API with its ServiceAccount token.
+	if s.ProxyToken != "" && !isDiscoveryPath(remainingPath) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(token), []byte(s.ProxyToken)) != 1 {
 			metrics.AuthFailuresTotal.WithLabelValues("proxy").Inc()
@@ -374,11 +374,36 @@ func normalizeMethod(m string) string {
 	}
 }
 
-// isOpenAPIDiscoveryPath returns true for Kubernetes OpenAPI schema discovery
-// paths. These are exempted from proxy token auth because ArgoCD's client-go
-// fetches them without sending the cluster bearer token.
-func isOpenAPIDiscoveryPath(path string) bool {
-	return strings.HasPrefix(path, "/openapi/")
+// isDiscoveryPath returns true for Kubernetes API discovery and schema paths.
+// These are exempted from proxy token auth because ArgoCD's internal
+// kubectl/client-go sync code path fetches them without sending the cluster
+// bearer token. Discovery endpoints are read-only metadata; the agent still
+// authenticates to the K8s API with its ServiceAccount token.
+//
+// Covered paths:
+//
+//	/openapi/v2, /openapi/v3, /openapi/v3/{group}/{version}
+//	/version
+//	/api, /api/{version}
+//	/apis, /apis/{group}, /apis/{group}/{version}
+//
+// NOT covered (require proxy token):
+//
+//	/api/v1/pods, /apis/apps/v1/deployments, etc. (resource endpoints)
+func isDiscoveryPath(path string) bool {
+	if strings.HasPrefix(path, "/openapi/") || path == "/version" {
+		return true
+	}
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	switch segments[0] {
+	case "api":
+		// /api or /api/v1 but NOT /api/v1/pods
+		return len(segments) <= 2
+	case "apis":
+		// /apis, /apis/apps, or /apis/apps/v1 but NOT /apis/apps/v1/deployments
+		return len(segments) <= 3
+	}
+	return false
 }
 
 func isUpgradeRequest(r *http.Request) bool {

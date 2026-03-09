@@ -157,11 +157,10 @@ func TestProxyTokenAuth(t *testing.T) {
 	}
 }
 
-// TestOpenAPIBypassesProxyAuth verifies that OpenAPI discovery paths
-// (/openapi/v2, /openapi/v3) are allowed through without the proxy bearer
-// token. ArgoCD's client-go downloads these endpoints for client-side
-// validation without sending the cluster bearer token.
-func TestOpenAPIBypassesProxyAuth(t *testing.T) {
+// TestDiscoveryBypassesProxyAuth verifies that Kubernetes API discovery paths
+// are allowed through without the proxy bearer token. ArgoCD's internal
+// kubectl sync code path downloads these without the cluster bearer token.
+func TestDiscoveryBypassesProxyAuth(t *testing.T) {
 	targetAddr, targetCleanup := startHTTPEchoTarget(t)
 	defer targetCleanup()
 
@@ -189,8 +188,19 @@ func TestOpenAPIBypassesProxyAuth(t *testing.T) {
 
 	waitForAgent(t, reg, 5*time.Second)
 
-	// OpenAPI paths should succeed WITHOUT the proxy token.
-	for _, path := range []string{"/openapi/v2", "/openapi/v3", "/openapi/v3/apis/apps/v1"} {
+	// Discovery paths should succeed WITHOUT the proxy token.
+	allowedPaths := []string{
+		"/openapi/v2",
+		"/openapi/v3",
+		"/openapi/v3/apis/apps/v1",
+		"/api",
+		"/api/v1",
+		"/apis",
+		"/apis/apps",
+		"/apis/apps/v1",
+		"/version",
+	}
+	for _, path := range allowedPaths {
 		resp, err := http.Get(ts.URL + "/tunnel/c1" + path)
 		if err != nil {
 			t.Fatalf("request %s: %v", path, err)
@@ -205,14 +215,22 @@ func TestOpenAPIBypassesProxyAuth(t *testing.T) {
 		}
 	}
 
-	// Non-OpenAPI paths should still require the proxy token.
-	resp, err := http.Get(ts.URL + "/tunnel/c1/api/v1/pods")
-	if err != nil {
-		t.Fatalf("request: %v", err)
+	// Resource endpoints should still require the proxy token.
+	blockedPaths := []string{
+		"/api/v1/pods",
+		"/api/v1/namespaces/default/services",
+		"/apis/apps/v1/deployments",
+		"/apis/apps/v1/namespaces/default/deployments",
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("non-openapi without token: got %d, want 401", resp.StatusCode)
+	for _, path := range blockedPaths {
+		resp, err := http.Get(ts.URL + "/tunnel/c1" + path)
+		if err != nil {
+			t.Fatalf("request %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s without token: got %d, want 401", path, resp.StatusCode)
+		}
 	}
 }
 
