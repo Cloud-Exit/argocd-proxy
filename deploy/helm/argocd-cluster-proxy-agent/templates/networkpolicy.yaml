@@ -1,0 +1,55 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "proxy-agent.fullname" . }}
+  labels:
+    {{- include "proxy-agent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "proxy-agent.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Health/metrics port only. Kubelet probes and Prometheus scraping.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.healthPort }}
+      {{- with .Values.networkPolicy.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    # Allow DNS resolution (kube-dns / CoreDNS in kube-system).
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+    # Allow egress to the Kubernetes API (kubernetes.default.svc:443).
+    - ports:
+        - protocol: TCP
+          port: 443
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+    # Allow egress to the proxy server (external, typically over the internet).
+    {{- with .Values.networkPolicy.proxyServerCIDR }}
+    - ports:
+        - protocol: TCP
+          port: 443
+      to:
+        - ipBlock:
+            cidr: {{ . }}
+    {{- end }}
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

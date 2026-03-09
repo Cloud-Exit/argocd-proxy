@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloud-exit/argocd-cluster-proxy/pkg/metrics"
@@ -18,6 +19,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
 )
+
+// MaxProxyBodySize is the maximum request body size allowed through the proxy.
+const MaxProxyBodySize = 32 << 20 // 32 MiB
 
 // Server is the management-cluster component that accepts agent tunnels and
 // proxies ArgoCD requests through them.
@@ -32,6 +36,12 @@ type Server struct {
 
 	// limiter rate-limits proxy requests. Nil means unlimited.
 	limiter *rate.Limiter
+
+	// connWg tracks active handleConnect goroutines for graceful shutdown.
+	connWg sync.WaitGroup
+	// stopCh is closed on shutdown to signal active sessions to stop.
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // Option configures the server.
@@ -66,7 +76,8 @@ func New(reg *Registry, logger *slog.Logger, opts ...Option) *Server {
 				return r.Header.Get("Origin") == ""
 			},
 		},
-		log: logger,
+		log:    logger,
+		stopCh: make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(s)
@@ -109,6 +120,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	clusterID := s.registry.Authenticate(token)
 	if clusterID == "" {
+		metrics.AuthFailuresTotal.WithLabelValues("connect").Inc()
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -118,6 +130,22 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("websocket upgrade", "err", err)
 		return
 	}
+
+	s.connWg.Add(1)
+	defer s.connWg.Done()
+
+	// Merge request context with server shutdown signal so that
+	// sess.Serve unblocks when either the client disconnects or
+	// the server is shutting down.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	go func() {
+		select {
+		case <-s.stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 
 	// [H2 fix] Limit WebSocket message size to 16 MiB.
 	ws.SetReadLimit(16 << 20)
@@ -136,8 +164,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serve blocks until the WebSocket closes.
-	if err := sess.Serve(r.Context()); err != nil {
+	// Serve blocks until the WebSocket closes or shutdown is signalled.
+	if err := sess.Serve(ctx); err != nil {
 		log.Info("agent disconnected", "err", err)
 	}
 	sess.Drain(5 * time.Second)
@@ -169,6 +197,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if s.ProxyToken != "" {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(token), []byte(s.ProxyToken)) != 1 {
+			metrics.AuthFailuresTotal.WithLabelValues("proxy").Inc()
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -177,6 +206,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// forwarded separately via the X-Forwarded-Authorization header
 		// or by the caller re-adding it after proxy auth.
 	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, MaxProxyBodySize)
 
 	clusterID, remainingPath := parseClusterPath(r.URL.Path)
 	if clusterID == "" {
@@ -218,7 +249,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 				return cluster.session.Dial(r.Context(), cluster.TargetAddr)
 			},
-			DisableKeepAlives: true, // one tunnel conn per request, simplifies lifecycle
+			DisableKeepAlives:     true, // one tunnel conn per request, simplifies lifecycle
+			ResponseHeaderTimeout: 30 * time.Second,
 		},
 		ErrorHandler: func(rw http.ResponseWriter, _ *http.Request, err error) {
 			// [H6 fix] Do not leak internal error details to the client.
@@ -232,9 +264,20 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(rec, r)
 	metrics.ProxyRequestsTotal.WithLabelValues(clusterID, normalizeMethod(r.Method), fmt.Sprintf("%d", rec.code)).Inc()
 	metrics.ProxyRequestDuration.WithLabelValues(clusterID).Observe(time.Since(start).Seconds())
+	s.log.Info("proxy",
+		"cluster", clusterID,
+		"method", r.Method,
+		"path", remainingPath,
+		"status", rec.code,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"remote", r.RemoteAddr,
+	)
 }
 
 func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request, cluster *Cluster, path string) {
+	start := time.Now()
+	r.Body = http.MaxBytesReader(w, r.Body, MaxProxyBodySize)
+
 	tunnelConn, err := cluster.session.Dial(r.Context(), cluster.TargetAddr)
 	if err != nil {
 		// [H6 fix] Generic error.
@@ -291,6 +334,15 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request, cluster *
 	}()
 	_, _ = io.Copy(clientConn, tunnelConn)
 	<-done
+
+	s.log.Info("proxy",
+		"cluster", cluster.ID,
+		"method", r.Method,
+		"path", path,
+		"upgrade", true,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"remote", r.RemoteAddr,
+	)
 }
 
 // ---------- helpers ----------
@@ -376,6 +428,20 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
+// Drain signals all active WebSocket sessions to stop and waits for them
+// to finish, up to the given timeout.
+func (s *Server) Drain(timeout time.Duration) {
+	s.stopOnce.Do(func() { close(s.stopCh) })
+	done := make(chan struct{})
+	go func() { s.connWg.Wait(); close(done) }()
+	select {
+	case <-done:
+		s.log.Info("all sessions drained")
+	case <-time.After(timeout):
+		s.log.Warn("session drain timed out")
+	}
+}
+
 // ListenAndServe starts the proxy server. It blocks until the context is
 // cancelled, then gracefully shuts down.
 func ListenAndServe(ctx context.Context, addr string, handler http.Handler) error {
@@ -383,6 +449,7 @@ func ListenAndServe(ctx context.Context, addr string, handler http.Handler) erro
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	errCh := make(chan error, 1)

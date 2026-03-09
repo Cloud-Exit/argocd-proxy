@@ -32,6 +32,11 @@ var (
 		Name: "proxy_rate_limited_total",
 		Help: "Total number of proxy requests that were rate limited.",
 	})
+
+	AuthFailuresTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "auth_failures_total",
+		Help: "Total authentication failures.",
+	}, []string{"endpoint"})
 )
 
 // Agent-side metrics.

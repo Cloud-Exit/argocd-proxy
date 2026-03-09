@@ -78,6 +78,28 @@ rbac:
     - nonResourceURLs: ["*"]
       verbs: ["*"]
 
+networkPolicy:
+  enabled: false
+  # -- CIDR of the proxy server (e.g. "203.0.113.10/32"). Required when
+  # networkPolicy is enabled so the agent can reach the management cluster.
+  proxyServerCIDR: ""
+  # -- Optional ingress source restriction for the health/metrics port.
+  # If empty, the port is reachable from any source (kubelet probes
+  # typically come from node IPs which are hard to restrict portably).
+  # Example: restrict to a monitoring namespace:
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: monitoring
+  ingressFrom: []
+  # -- Additional egress rules beyond DNS, K8s API, and the proxy server.
+  extraEgress: []
+  #   - ports:
+  #       - protocol: TCP
+  #         port: 9090
+  #     to:
+  #       - ipBlock:
+  #           cidr: 10.0.0.0/8
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""

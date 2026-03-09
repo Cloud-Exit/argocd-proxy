@@ -27,6 +27,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "proxy-server.serviceAccountName" . }}
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         seccompProfile:

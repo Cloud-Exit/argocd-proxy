@@ -1,0 +1,32 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "proxy-server.fullname" . }}
+  labels:
+    {{- include "proxy-server.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "proxy-server.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.port }}
+      from:
+        # Allow traffic from the ArgoCD namespace (proxy requests).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.allowedNamespace }}
+        {{- with .Values.networkPolicy.extraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+  # Egress: deny all. The server never initiates outbound connections —
+  # agents connect inbound via WebSocket, and proxy traffic flows over
+  # those established tunnels. Return traffic on accepted connections is
+  # handled by conntrack (all major CNIs: Calico, Cilium, Weave, Antrea).
+  egress: []
+{{- end }}

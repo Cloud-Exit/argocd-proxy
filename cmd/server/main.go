@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cloud-exit/argocd-cluster-proxy/pkg/server"
 )
@@ -68,8 +69,8 @@ func main() {
 	logger.Info("starting proxy server", "addr", *addr, "clusters", len(clusters), "version", version)
 	if err := server.ListenAndServe(ctx, *addr, srv.Handler()); err != nil {
 		logger.Error("server error", "err", err)
-		os.Exit(1)
 	}
+	srv.Drain(10 * time.Second)
 }
 
 func loadClusters(path string) ([]server.ClusterConfig, error) {

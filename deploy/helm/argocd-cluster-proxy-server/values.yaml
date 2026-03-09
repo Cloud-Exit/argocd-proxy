@@ -61,6 +61,19 @@ serviceAccount:
   name: ""
   annotations: {}
 
+networkPolicy:
+  enabled: false
+  # -- Namespace allowed to send ingress traffic to the proxy server.
+  # Defaults to the ArgoCD namespace. Uses the automatic
+  # kubernetes.io/metadata.name label (available in K8s 1.21+).
+  allowedNamespace: argocd
+  # -- Additional ingress sources (e.g. monitoring namespace).
+  # Each entry is a standard NetworkPolicy peer object.
+  extraFrom: []
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: monitoring
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
