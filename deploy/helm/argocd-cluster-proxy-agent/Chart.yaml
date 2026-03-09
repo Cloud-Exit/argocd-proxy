@@ -2,7 +2,7 @@ apiVersion: v2
 name: argocd-cluster-proxy-agent
 description: Customer-cluster agent for argocd-cluster-proxy — tunnels K8s API requests with automatic credential injection
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.3"
 keywords:
   - argocd
