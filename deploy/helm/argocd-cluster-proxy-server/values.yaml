@@ -7,13 +7,6 @@ replicas: 1
 port: 8080
 logLevel: info
 
-# -- Bearer token required on /tunnel/ proxy requests. ArgoCD cluster secrets
-# include this token so ArgoCD can authenticate to the proxy.
-# REQUIRED in production. Set via --set proxyToken=<secret> or use
-# existingProxyTokenSecret to reference an existing Secret.
-proxyToken: ""
-existingProxyTokenSecret: ""  # name of Secret with key "proxy-token"
-
 resources:
   requests:
     cpu: 50m
@@ -60,9 +53,6 @@ serviceAccount:
   create: true
   name: ""
   annotations: {}
-
-networkPolicy:
-  enabled: false
 
 imagePullSecrets: []
 nameOverride: ""

@@ -101,66 +101,10 @@ func TestEndToEndHTTPProxy(t *testing.T) {
 	}
 }
 
-func TestProxyTokenAuth(t *testing.T) {
-	targetAddr, targetCleanup := startHTTPEchoTarget(t)
-	defer targetCleanup()
-
-	clusters := []server.ClusterConfig{
-		{ID: "c1", Token: "agent-token", TargetAddr: targetAddr},
-	}
-	reg := server.NewRegistry(clusters)
-	srv := server.New(reg, nil, server.WithProxyToken("proxy-secret"))
-
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Connect agent.
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/connect"
-	a, _ := agent.New(agent.Config{
-		ServerURL:           wsURL,
-		Token:               "agent-token",
-		TargetAddr:          targetAddr,
-		PlainTarget:         true,
-		AllowInsecureServer: true,
-	}, nil)
-	go func() { _ = a.Run(ctx) }()
-
-	waitForAgent(t, reg, 5*time.Second)
-
-	// Request without proxy token should fail.
-	resp, err := http.Get(ts.URL + "/tunnel/c1/api/v1/pods")
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("no-token status: got %d, want 401", resp.StatusCode)
-	}
-
-	// Request with correct proxy token should succeed.
-	req, _ := http.NewRequest("GET", ts.URL+"/tunnel/c1/api/v1/pods", nil)
-	req.Header.Set("Authorization", "Bearer proxy-secret")
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("with-token status: got %d, want 200", resp.StatusCode)
-	}
-	if !strings.Contains(string(body), "path=/api/v1/pods") {
-		t.Errorf("body: got %q", string(body))
-	}
-}
-
-// TestDiscoveryBypassesProxyAuth verifies that Kubernetes API discovery paths
-// are allowed through without the proxy bearer token. ArgoCD's internal
-// kubectl sync code path downloads these without the cluster bearer token.
-func TestDiscoveryBypassesProxyAuth(t *testing.T) {
+// TestProxyNoAuthRequired verifies that /tunnel/ proxy requests work without
+// any bearer token. Proxy token auth was removed because ArgoCD's internal
+// sync code paths do not consistently send the cluster bearer token.
+func TestProxyNoAuthRequired(t *testing.T) {
 	targetAddr, targetCleanup := startHTTPEchoTarget(t)
 	defer targetCleanup()
 
@@ -188,19 +132,14 @@ func TestDiscoveryBypassesProxyAuth(t *testing.T) {
 
 	waitForAgent(t, reg, 5*time.Second)
 
-	// Discovery paths should succeed WITHOUT the proxy token.
-	allowedPaths := []string{
+	// All paths should succeed without the proxy token.
+	for _, path := range []string{
+		"/api/v1/pods",
+		"/apis/apps/v1/deployments",
 		"/openapi/v2",
-		"/openapi/v3",
-		"/openapi/v3/apis/apps/v1",
-		"/api",
 		"/api/v1",
 		"/apis",
-		"/apis/apps",
-		"/apis/apps/v1",
-		"/version",
-	}
-	for _, path := range allowedPaths {
+	} {
 		resp, err := http.Get(ts.URL + "/tunnel/c1" + path)
 		if err != nil {
 			t.Fatalf("request %s: %v", path, err)
@@ -212,24 +151,6 @@ func TestDiscoveryBypassesProxyAuth(t *testing.T) {
 		}
 		if !strings.Contains(string(body), "path="+path) {
 			t.Errorf("%s: unexpected body %q", path, string(body))
-		}
-	}
-
-	// Resource endpoints should still require the proxy token.
-	blockedPaths := []string{
-		"/api/v1/pods",
-		"/api/v1/namespaces/default/services",
-		"/apis/apps/v1/deployments",
-		"/apis/apps/v1/namespaces/default/deployments",
-	}
-	for _, path := range blockedPaths {
-		resp, err := http.Get(ts.URL + "/tunnel/c1" + path)
-		if err != nil {
-			t.Fatalf("request %s: %v", path, err)
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("%s without token: got %d, want 401", path, resp.StatusCode)
 		}
 	}
 }

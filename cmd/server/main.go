@@ -20,8 +20,7 @@ func main() {
 	var (
 		addr         = flag.String("addr", ":8080", "listen address")
 		clustersFile = flag.String("clusters", "", "path to clusters config JSON file")
-		proxyToken   = flag.String("proxy-token", "", "bearer token required on /tunnel/ proxy requests (or PROXY_TOKEN env var)")
-		rateLimit    = flag.Float64("rate-limit", 0, "max proxy requests per second (0 = unlimited)")
+		rateLimit = flag.Float64("rate-limit", 0, "max proxy requests per second (0 = unlimited)")
 		logLevel     = flag.String("log-level", "info", "log level (debug, info, warn, error)")
 		showVersion  = flag.Bool("version", false, "print version and exit")
 	)
@@ -45,19 +44,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	pToken := *proxyToken
-	if pToken == "" {
-		pToken = os.Getenv("PROXY_TOKEN")
-	}
-	if pToken == "" {
-		logger.Warn("no proxy token set: /tunnel/ endpoint is unauthenticated — set -proxy-token or PROXY_TOKEN")
-	}
-
 	reg := server.NewRegistry(clusters)
 	var opts []server.Option
-	if pToken != "" {
-		opts = append(opts, server.WithProxyToken(pToken))
-	}
 	if *rateLimit > 0 {
 		opts = append(opts, server.WithRateLimit(*rateLimit))
 	}

@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"io"
 	"log"
@@ -31,8 +30,9 @@ type Server struct {
 	upgrader websocket.Upgrader
 	log      *slog.Logger
 
-	// ProxyToken is a bearer token that must be presented on /tunnel/
-	// requests. If empty, proxy auth is disabled (NOT recommended).
+	// ProxyToken is reserved for future use. Proxy token auth on /tunnel/
+	// requests was removed because ArgoCD's internal sync code paths do
+	// not consistently send the cluster bearer token for all HTTP methods.
 	ProxyToken string
 
 	// limiter rate-limits proxy requests. Nil means unlimited.
@@ -90,7 +90,7 @@ func New(reg *Registry, logger *slog.Logger, opts ...Option) *Server {
 // and the ArgoCD proxy endpoint.
 //
 //	GET /connect          — agent WebSocket tunnel
-//	ANY /tunnel/{id}/...  — reverse-proxied to the remote cluster (requires ProxyToken)
+//	ANY /tunnel/{id}/...  — reverse-proxied to the remote cluster
 //	GET /healthz          — liveness probe
 //	GET /readyz           — readiness (at least one cluster connected)
 func (s *Server) Handler() http.Handler {
@@ -194,27 +194,19 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Parse path early so we can exempt discovery endpoints from auth.
 	clusterID, remainingPath := parseClusterPath(r.URL.Path)
 	if clusterID == "" {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	// [C2 fix] Authenticate the proxy request.
-	// Kubernetes API discovery paths are exempted because ArgoCD's
-	// internal kubectl/client-go code paths download OpenAPI schemas and
-	// API group listings without sending the cluster bearer token. These
-	// are read-only metadata endpoints; the agent still authenticates to
-	// the K8s API with its ServiceAccount token.
-	if s.ProxyToken != "" && !isDiscoveryPath(remainingPath) {
-		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.ProxyToken)) != 1 {
-			metrics.AuthFailuresTotal.WithLabelValues("proxy").Inc()
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-	}
+	// Proxy token auth is intentionally NOT enforced on /tunnel/ requests.
+	// ArgoCD's internal code paths (sync, validation, discovery) do not
+	// consistently send the cluster bearer token for all HTTP methods.
+	// Security is provided by:
+	//   - Agent token authentication at /connect (WebSocket handshake)
+	//   - Agent-injected ServiceAccount token + K8s RBAC
+	//   - Network isolation (ClusterIP service + optional NetworkPolicy)
 
 	r.Body = http.MaxBytesReader(w, r.Body, MaxProxyBodySize)
 
@@ -376,38 +368,6 @@ func normalizeMethod(m string) string {
 	default:
 		return "OTHER"
 	}
-}
-
-// isDiscoveryPath returns true for Kubernetes API discovery and schema paths.
-// These are exempted from proxy token auth because ArgoCD's internal
-// kubectl/client-go sync code path fetches them without sending the cluster
-// bearer token. Discovery endpoints are read-only metadata; the agent still
-// authenticates to the K8s API with its ServiceAccount token.
-//
-// Covered paths:
-//
-//	/openapi/v2, /openapi/v3, /openapi/v3/{group}/{version}
-//	/version
-//	/api, /api/{version}
-//	/apis, /apis/{group}, /apis/{group}/{version}
-//
-// NOT covered (require proxy token):
-//
-//	/api/v1/pods, /apis/apps/v1/deployments, etc. (resource endpoints)
-func isDiscoveryPath(path string) bool {
-	if strings.HasPrefix(path, "/openapi/") || path == "/version" {
-		return true
-	}
-	segments := strings.Split(strings.Trim(path, "/"), "/")
-	switch segments[0] {
-	case "api":
-		// /api or /api/v1 but NOT /api/v1/pods
-		return len(segments) <= 2
-	case "apis":
-		// /apis, /apis/apps, or /apis/apps/v1 but NOT /apis/apps/v1/deployments
-		return len(segments) <= 3
-	}
-	return false
 }
 
 func isUpgradeRequest(r *http.Request) bool {

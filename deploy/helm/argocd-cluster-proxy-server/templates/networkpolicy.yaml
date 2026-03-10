@@ -1,4 +1,3 @@
-{{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -16,7 +15,8 @@ spec:
     # Allow all sources on the server port. The proxy server must be reachable
     # by both ArgoCD (in-cluster) and agents (external/internet), so
     # namespace-based source restrictions are not practical. Authentication
-    # is handled at the application layer (bearer tokens on both endpoints).
+    # is handled at the application layer (bearer tokens on the /connect
+    # endpoint).
     - ports:
         - protocol: TCP
           port: {{ .Values.port }}
@@ -25,4 +25,3 @@ spec:
   # those established tunnels. Return traffic on accepted connections is
   # handled by conntrack (all major CNIs: Calico, Cilium, Weave, Antrea).
   egress: []
-{{- end }}

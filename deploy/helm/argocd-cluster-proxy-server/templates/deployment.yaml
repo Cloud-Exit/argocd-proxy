@@ -45,20 +45,6 @@ spec:
             - -addr=:{{ .Values.port }}
             - -clusters=/config/clusters.json
             - -log-level={{ .Values.logLevel }}
-          env:
-            {{- if .Values.existingProxyTokenSecret }}
-            - name: PROXY_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.existingProxyTokenSecret }}
-                  key: proxy-token
-            {{- else if .Values.proxyToken }}
-            - name: PROXY_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "proxy-server.fullname" . }}-proxy-token
-                  key: proxy-token
-            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.port }}

@@ -79,9 +79,8 @@ rbac:
       verbs: ["*"]
 
 networkPolicy:
-  enabled: false
-  # -- CIDR of the proxy server (e.g. "203.0.113.10/32"). Required when
-  # networkPolicy is enabled so the agent can reach the management cluster.
+  # -- CIDR of the proxy server (e.g. "203.0.113.10/32"). Required so the
+  # agent can reach the management cluster.
   proxyServerCIDR: ""
   # -- Optional ingress source restriction for the health/metrics port.
   # If empty, the port is reachable from any source (kubelet probes
