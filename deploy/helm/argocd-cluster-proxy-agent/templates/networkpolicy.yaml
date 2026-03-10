@@ -21,16 +21,14 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
   egress:
-    # Allow DNS resolution (kube-dns / CoreDNS in kube-system).
+    # Allow DNS resolution. No destination restriction — DNS infrastructure
+    # varies across clusters (CoreDNS in kube-system, node-local DNS cache,
+    # custom setups) and restricting by namespace is fragile.
     - ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
-      to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
     # Allow egress to the Kubernetes API (kubernetes.default.svc:443).
     - ports:
         - protocol: TCP
