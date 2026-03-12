@@ -4,7 +4,8 @@ image:
   pullPolicy: IfNotPresent
 
 replicas: 1
-port: 8080
+port: 8443          # public port (agents connect via Ingress)
+internalPort: 8080  # internal port (ArgoCD tunnel, metrics)
 logLevel: info
 
 resources:
@@ -14,7 +15,7 @@ resources:
   limits:
     memory: 256Mi
 
-metricsPort: 0  # set to e.g. 9090 to expose a separate metrics port (0 = metrics on main port)
+metricsPort: 0  # deprecated: metrics are now served on internalPort
 
 pdb:
   enabled: false
@@ -34,7 +35,8 @@ podAnnotations: {}
 
 service:
   type: ClusterIP
-  port: 8080
+  port: 8443          # public service port
+  internalPort: 8080  # internal service port
 
 # -- Cluster definitions. Each entry allows an agent with the matching token
 # to connect and (optionally) creates an ArgoCD cluster secret.
@@ -48,11 +50,24 @@ clusters: []
 argocd:
   enabled: false
   namespace: argocd  # namespace where ArgoCD is installed
+  # -- Base64-encoded CA cert for ArgoCD to verify the proxy server (when TLS enabled).
+  caData: ""
+  # -- Base64-encoded client certificate for ArgoCD to present to the proxy (when mTLS enabled).
+  clientCertData: ""
+  # -- Base64-encoded client private key for ArgoCD (when mTLS enabled).
+  clientKeyData: ""
 
 serviceAccount:
   create: true
   name: ""
   annotations: {}
+
+# -- TLS configuration. When enabled, both ports serve TLS.
+# If clientCASecret is also set, the server requires client certificates (mTLS).
+tls:
+  enabled: false
+  certSecret: ""      # name of Secret containing tls.crt and tls.key
+  clientCASecret: ""  # name of Secret containing ca.crt for mTLS
 
 imagePullSecrets: []
 nameOverride: ""

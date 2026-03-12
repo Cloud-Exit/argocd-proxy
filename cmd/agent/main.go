@@ -27,6 +27,9 @@ func main() {
 		plainTarget     = flag.Bool("plain-target", false, "connect to target without TLS (for testing)")
 		saTokenPath     = flag.String("sa-token-path", "/var/run/secrets/kubernetes.io/serviceaccount/token", "path to ServiceAccount token for authenticating to the local K8s API (empty to disable)")
 		insecureServer  = flag.Bool("allow-insecure-server", false, "allow plaintext ws:// connection to the proxy server")
+		serverCACert    = flag.String("server-ca-cert", "", "path to CA cert for verifying the proxy server")
+		clientCert      = flag.String("client-cert", "", "path to client certificate for mTLS")
+		clientKey       = flag.String("client-key", "", "path to client private key for mTLS")
 		maxRetry        = flag.Duration("max-retry", 60*time.Second, "max reconnect backoff interval")
 		healthAddr      = flag.String("health-addr", ":8081", "address for health/metrics HTTP server (empty to disable)")
 		logLevel        = flag.String("log-level", "info", "log level")
@@ -72,6 +75,9 @@ func main() {
 		Insecure:            *insecure,
 		PlainTarget:         *plainTarget,
 		AllowInsecureServer: *insecureServer,
+		ServerCACertPath:    *serverCACert,
+		ClientCertPath:      *clientCert,
+		ClientKeyPath:       *clientKey,
 		MaxRetryInterval:    *maxRetry,
 	}, logger)
 	if err != nil {

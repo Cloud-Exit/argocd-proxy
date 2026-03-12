@@ -50,6 +50,13 @@ spec:
             {{- if .Values.insecure }}
             - -insecure
             {{- end }}
+            {{- if .Values.tls.serverCASecret }}
+            - -server-ca-cert=/tls-server-ca/ca.crt
+            {{- end }}
+            {{- if .Values.tls.clientCertSecret }}
+            - -client-cert=/tls-client/tls.crt
+            - -client-key=/tls-client/tls.key
+            {{- end }}
           env:
             - name: TOKEN
               valueFrom:
@@ -78,6 +85,32 @@ spec:
             periodSeconds: 5
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if or .Values.tls.serverCASecret .Values.tls.clientCertSecret }}
+          volumeMounts:
+            {{- if .Values.tls.serverCASecret }}
+            - name: tls-server-ca
+              mountPath: /tls-server-ca
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tls.clientCertSecret }}
+            - name: tls-client
+              mountPath: /tls-client
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.tls.serverCASecret .Values.tls.clientCertSecret }}
+      volumes:
+        {{- if .Values.tls.serverCASecret }}
+        - name: tls-server-ca
+          secret:
+            secretName: {{ .Values.tls.serverCASecret }}
+        {{- end }}
+        {{- if .Values.tls.clientCertSecret }}
+        - name: tls-client
+          secret:
+            secretName: {{ .Values.tls.clientCertSecret }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}

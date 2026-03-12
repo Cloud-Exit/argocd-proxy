@@ -2,11 +2,20 @@ package server_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -101,10 +110,10 @@ func TestEndToEndHTTPProxy(t *testing.T) {
 	}
 }
 
-// TestProxyNoAuthRequired verifies that /tunnel/ proxy requests work without
-// any bearer token. Proxy token auth was removed because ArgoCD's internal
-// sync code paths do not consistently send the cluster bearer token.
-func TestProxyNoAuthRequired(t *testing.T) {
+// TestAuthorizationStrippedBeforeTunnel verifies that any Authorization header
+// from the caller is NOT forwarded through the tunnel to the target. The agent
+// should be the only one injecting credentials.
+func TestAuthorizationStrippedBeforeTunnel(t *testing.T) {
 	targetAddr, targetCleanup := startHTTPEchoTarget(t)
 	defer targetCleanup()
 
@@ -112,7 +121,7 @@ func TestProxyNoAuthRequired(t *testing.T) {
 		{ID: "c1", Token: "agent-token", TargetAddr: targetAddr},
 	}
 	reg := server.NewRegistry(clusters)
-	srv := server.New(reg, nil, server.WithProxyToken("proxy-secret"))
+	srv := server.New(reg, nil)
 
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -132,66 +141,12 @@ func TestProxyNoAuthRequired(t *testing.T) {
 
 	waitForAgent(t, reg, 5*time.Second)
 
-	// All paths should succeed without the proxy token.
-	for _, path := range []string{
-		"/api/v1/pods",
-		"/apis/apps/v1/deployments",
-		"/openapi/v2",
-		"/api/v1",
-		"/apis",
-	} {
-		resp, err := http.Get(ts.URL + "/tunnel/c1" + path)
-		if err != nil {
-			t.Fatalf("request %s: %v", path, err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("%s: got %d, want 200", path, resp.StatusCode)
-		}
-		if !strings.Contains(string(body), "path="+path) {
-			t.Errorf("%s: unexpected body %q", path, string(body))
-		}
-	}
-}
-
-// TestProxyTokenStrippedBeforeTunnel verifies that the proxy token (or any
-// Authorization header from the caller) is NOT forwarded through the tunnel
-// to the target. The agent should be the only one injecting credentials.
-func TestProxyTokenStrippedBeforeTunnel(t *testing.T) {
-	targetAddr, targetCleanup := startHTTPEchoTarget(t)
-	defer targetCleanup()
-
-	clusters := []server.ClusterConfig{
-		{ID: "c1", Token: "agent-token", TargetAddr: targetAddr},
-	}
-	reg := server.NewRegistry(clusters)
-	srv := server.New(reg, nil, server.WithProxyToken("proxy-secret"))
-
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/connect"
-	a, _ := agent.New(agent.Config{
-		ServerURL:           wsURL,
-		Token:               "agent-token",
-		TargetAddr:          targetAddr,
-		PlainTarget:         true,
-		AllowInsecureServer: true,
-	}, nil)
-	go func() { _ = a.Run(ctx) }()
-
-	waitForAgent(t, reg, 5*time.Second)
-
-	// Send request with proxy token. The echo server reports the auth
-	// header it received via X-Got-Auth. It should be empty because the
-	// server must strip Authorization before tunneling, and in tests
-	// there is no SA token file for the agent to inject.
+	// Send request with an Authorization header. The echo server reports
+	// the auth header it received via X-Got-Auth. It should be empty
+	// because the server must strip Authorization before tunneling, and
+	// in tests there is no SA token file for the agent to inject.
 	req, _ := http.NewRequest("GET", ts.URL+"/tunnel/c1/check-auth", nil)
-	req.Header.Set("Authorization", "Bearer proxy-secret")
+	req.Header.Set("Authorization", "Bearer some-caller-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)
@@ -202,10 +157,10 @@ func TestProxyTokenStrippedBeforeTunnel(t *testing.T) {
 		t.Fatalf("status: got %d, want 200", resp.StatusCode)
 	}
 
-	// The echo target should NOT have received the proxy token.
+	// The echo target should NOT have received the caller's token.
 	gotAuth := resp.Header.Get("X-Got-Auth")
-	if strings.Contains(gotAuth, "proxy-secret") {
-		t.Errorf("proxy token leaked through tunnel: X-Got-Auth=%q", gotAuth)
+	if strings.Contains(gotAuth, "some-caller-token") {
+		t.Errorf("caller token leaked through tunnel: X-Got-Auth=%q", gotAuth)
 	}
 }
 
@@ -513,6 +468,67 @@ func TestUpgradeRequestProxy(t *testing.T) {
 	}
 }
 
+// TestPublicHandlerDoesNotServeTunnel verifies that PublicHandler does not
+// expose /tunnel/ or /metrics endpoints.
+func TestPublicHandlerDoesNotServeTunnel(t *testing.T) {
+	reg := server.NewRegistry(nil)
+	srv := server.New(reg, nil)
+	ts := httptest.NewServer(srv.PublicHandler())
+	defer ts.Close()
+
+	for _, path := range []string{"/tunnel/c1/api/v1/pods", "/metrics", "/readyz"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatalf("request %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("PublicHandler %s: got %d, want 404", path, resp.StatusCode)
+		}
+	}
+
+	// /healthz should still work.
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("PublicHandler /healthz: got %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestInternalHandlerDoesNotServeConnect verifies that InternalHandler does
+// not expose the /connect WebSocket endpoint.
+func TestInternalHandlerDoesNotServeConnect(t *testing.T) {
+	reg := server.NewRegistry(nil)
+	srv := server.New(reg, nil)
+	ts := httptest.NewServer(srv.InternalHandler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/connect")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("InternalHandler /connect: got %d, want 404", resp.StatusCode)
+	}
+
+	// /healthz, /readyz, /metrics should work on internal handler.
+	for _, path := range []string{"/healthz", "/readyz"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatalf("request %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		// 200 or 503 (readyz with no clusters) — just not 404.
+		if resp.StatusCode == http.StatusNotFound {
+			t.Errorf("InternalHandler %s: got 404, expected it to be served", path)
+		}
+	}
+}
+
 func writeFile(path, content string) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -524,4 +540,208 @@ func writeFile(path, content string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// generateCA creates a self-signed CA certificate and key.
+func generateCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create CA cert: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse CA cert: %v", err)
+	}
+	return cert, key
+}
+
+// generateCert creates a certificate signed by the given CA.
+func generateCert(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, cn string, isServer bool) (tls.Certificate, *x509.Certificate) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+		DNSNames:     []string{"localhost"},
+	}
+	if isServer {
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	} else {
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	parsed, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  key,
+	}, parsed
+}
+
+// writePEM writes a PEM-encoded file.
+func writePEM(t *testing.T, dir, name, pemType string, data []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create %s: %v", path, err)
+	}
+	if err := pem.Encode(f, &pem.Block{Type: pemType, Bytes: data}); err != nil {
+		_ = f.Close()
+		t.Fatalf("encode %s: %v", path, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close %s: %v", path, err)
+	}
+	return path
+}
+
+// writeKeyPEM writes an EC private key as PEM.
+func writeKeyPEM(t *testing.T, dir, name string, key *ecdsa.PrivateKey) string {
+	t.Helper()
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	return writePEM(t, dir, name, "EC PRIVATE KEY", der)
+}
+
+func TestMTLSEndToEnd(t *testing.T) {
+	// --- Generate CA, server cert, client cert ---
+	caCert, caKey := generateCA(t)
+	serverTLS, _ := generateCert(t, caCert, caKey, "server", true)
+	clientTLS, _ := generateCert(t, caCert, caKey, "client", false)
+
+	dir := t.TempDir()
+	caCertPath := writePEM(t, dir, "ca.crt", "CERTIFICATE", caCert.Raw)
+	serverCertPath := writePEM(t, dir, "server.crt", "CERTIFICATE", serverTLS.Certificate[0])
+	serverKeyPath := writeKeyPEM(t, dir, "server.key", serverTLS.PrivateKey.(*ecdsa.PrivateKey))
+	clientCertPath := writePEM(t, dir, "client.crt", "CERTIFICATE", clientTLS.Certificate[0])
+	clientKeyPath := writeKeyPEM(t, dir, "client.key", clientTLS.PrivateKey.(*ecdsa.PrivateKey))
+
+	// --- Start echo target ---
+	targetAddr, targetCleanup := startHTTPEchoTarget(t)
+	defer targetCleanup()
+
+	// --- Start server with mTLS ---
+	clusters := []server.ClusterConfig{
+		{ID: "mtls-cluster", Token: "mtls-token", TargetAddr: targetAddr},
+	}
+	reg := server.NewRegistry(clusters)
+	srv := server.New(reg, nil)
+
+	tc := server.TLSConfig{
+		CertFile: serverCertPath,
+		KeyFile:  serverKeyPath,
+		CAFile:   caCertPath,
+	}
+
+	// Pick a free port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srvAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServeTLS(ctx, srvAddr, srv.Handler(), tc) }()
+
+	// Wait for server to be ready.
+	time.Sleep(200 * time.Millisecond)
+
+	// --- Connect agent with client cert ---
+	wsURL := "wss://" + srvAddr + "/connect"
+	a, err := agent.New(agent.Config{
+		ServerURL:        wsURL,
+		Token:            "mtls-token",
+		TargetAddr:       targetAddr,
+		PlainTarget:      true,
+		ServerCACertPath: caCertPath,
+		ClientCertPath:   clientCertPath,
+		ClientKeyPath:    clientKeyPath,
+	}, nil)
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+
+	agentCtx, agentCancel := context.WithCancel(ctx)
+	defer agentCancel()
+	go func() { _ = a.Run(agentCtx) }()
+
+	waitForAgent(t, reg, 5*time.Second)
+
+	// --- Proxy request through mTLS server ---
+	caPool := x509.NewCertPool()
+	caPool.AddCert(caCert)
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:      caPool,
+				Certificates: []tls.Certificate{clientTLS},
+				MinVersion:   tls.VersionTLS12,
+			},
+		},
+	}
+
+	resp, err := httpClient.Get("https://" + srvAddr + "/tunnel/mtls-cluster/api/v1/pods")
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d, want 200; body: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "path=/api/v1/pods") {
+		t.Errorf("body: got %q, want to contain path=/api/v1/pods", string(body))
+	}
+
+	// --- Verify connection without client cert is rejected ---
+	noClientCertHTTP := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:    caPool,
+				MinVersion: tls.VersionTLS12,
+			},
+		},
+	}
+
+	_, err = noClientCertHTTP.Get("https://" + srvAddr + "/tunnel/mtls-cluster/api/v1/pods")
+	if err == nil {
+		t.Fatal("expected TLS handshake error without client cert, got nil")
+	}
+	// The error should be a TLS-related error (remote error: tls: certificate required
+	// or similar). Any connection error here is acceptable.
+	t.Logf("correctly rejected without client cert: %v", err)
 }

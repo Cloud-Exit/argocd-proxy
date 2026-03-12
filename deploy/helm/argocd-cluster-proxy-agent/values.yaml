@@ -99,6 +99,13 @@ networkPolicy:
   #       - ipBlock:
   #           cidr: 10.0.0.0/8
 
+# -- TLS configuration for the connection to the proxy server.
+tls:
+  # -- Secret containing ca.crt to verify the proxy server's TLS certificate.
+  serverCASecret: ""
+  # -- Secret containing tls.crt and tls.key for mTLS client authentication.
+  clientCertSecret: ""
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""

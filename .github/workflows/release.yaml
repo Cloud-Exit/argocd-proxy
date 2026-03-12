@@ -8,6 +8,8 @@ on:
 permissions:
   contents: write
   packages: write
+  pages: write
+  id-token: write
 
 env:
   REGISTRY: ghcr.io
@@ -67,9 +69,6 @@ jobs:
   helm:
     runs-on: ubuntu-latest
     needs: [docker]
-    permissions:
-      contents: write
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -100,3 +99,35 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/argocd-cluster-proxy-*.tgz
+
+      - name: Build Helm repo index
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO_URL="https://${OWNER}.github.io/argocd-cluster-proxy"
+
+          # Download existing index to preserve previous versions.
+          curl -sSfL "${REPO_URL}/index.yaml" -o dist/existing-index.yaml 2>/dev/null || true
+
+          if [ -f dist/existing-index.yaml ]; then
+            helm repo index dist/ --url "${REPO_URL}" --merge dist/existing-index.yaml
+            rm dist/existing-index.yaml
+          else
+            helm repo index dist/ --url "${REPO_URL}"
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/
+
+  pages:
+    runs-on: ubuntu-latest
+    needs: [helm]
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

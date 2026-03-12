@@ -40,8 +40,7 @@ in the management cluster**.
    inbound firewall rules are required on the customer side.
 2. The agent authenticates with a **pre-shared token** mapped to a cluster ID.
 3. When ArgoCD makes a request to
-   `http://proxy-server:8080/tunnel/{cluster-id}/api/v1/...`, the server:
-   - Validates the proxy token (Authorization header)
+   `http://proxy-server-internal:8080/tunnel/{cluster-id}/api/v1/...`, the server:
    - **Strips the Authorization header** so no management-side credentials
      enter the tunnel
    - Opens a multiplexed connection through the WebSocket tunnel
@@ -56,7 +55,7 @@ in the management cluster**.
 
 | Component | Has customer K8s credentials? |
 |-----------|-------------------------------|
-| ArgoCD | No — only has a proxy token |
+| ArgoCD | No — only has the internal service URL (and optionally mTLS client cert) |
 | proxy-server | No — passes requests through the tunnel |
 | proxy-agent | Yes — reads its local SA token on each request |
 
@@ -65,13 +64,22 @@ Kubernetes token rotation via projected volumes.
 
 ### Security
 
-- **Constant-time auth** — SHA-256 + `subtle.ConstantTimeCompare`, all clusters
-  checked (no early return) to prevent timing attacks
+- **Two-port architecture** — the public port (`:8443`) only serves `/connect`
+  for agent WebSocket tunnels; the internal port (`:8080`) serves `/tunnel/`
+  for ArgoCD and is never exposed via Ingress
+- **mTLS (required for production)** — mutual TLS on both server ports provides
+  cryptographic identity verification; clients cannot connect without a valid
+  certificate signed by the trusted CA
+- **Constant-time auth** — agent tokens verified with SHA-256 +
+  `subtle.ConstantTimeCompare`, all clusters checked (no early return) to
+  prevent timing attacks
 - **Header stripping** — Authorization headers removed before tunneling,
   including RFC 7230 hop-by-hop headers
 - **SSRF protection** — agent only dials its configured target address
 - **TLS enforcement** — agent rejects plaintext `ws://` unless explicitly allowed;
   minimum TLS 1.2 on all connections
+- **Mandatory NetworkPolicy** — both charts deploy NetworkPolicy by default;
+  the server's internal port is restricted to the ArgoCD namespace
 - **Distroless images** — non-root, read-only rootfs, all capabilities dropped
 - **Connection limits** — max 1024 concurrent tunnel connections per session
 - **Rate limiting** — optional per-server request throttling
@@ -107,20 +115,49 @@ HTTP upgrade requests (SPDY, WebSocket) are fully supported for `kubectl exec`,
 
 ### Deploy with Helm
 
-There are **two separate Helm charts**, one for each cluster:
+There are **two separate Helm charts**, one for each cluster. You can install
+them from the Helm repository or directly via OCI:
+
+```bash
+# Option A: Helm repository (supports `helm search repo` to list all versions)
+helm repo add argocd-cluster-proxy https://cloud-exit.github.io/argocd-cluster-proxy
+helm repo update
+
+# Option B: OCI registry (no helm repo add needed)
+# Use oci://ghcr.io/cloud-exit/charts/<chart-name> directly in install commands
+```
 
 **Management cluster** (server + ArgoCD cluster secrets):
 
 ```bash
+# Using Helm repo:
+helm install proxy-server argocd-cluster-proxy/argocd-cluster-proxy-server \
+  --namespace proxy-system --create-namespace \
+  --set tls.enabled=true \
+  --set tls.certSecret=proxy-server-tls \
+  --set tls.clientCASecret=proxy-ca-keypair \
+  --set argocd.enabled=true \
+  --set argocd.namespace=argocd \
+  --set 'clusters[0].id=customer-a' \
+  --set 'clusters[0].token=<generate-agent-token>'
+
+# Or using OCI:
 helm install proxy-server \
   oci://ghcr.io/cloud-exit/charts/argocd-cluster-proxy-server \
   --namespace proxy-system --create-namespace \
-  --set proxyToken=<generate-a-random-token> \
+  --set tls.enabled=true \
+  --set tls.certSecret=proxy-server-tls \
+  --set tls.clientCASecret=proxy-ca-keypair \
   --set argocd.enabled=true \
   --set argocd.namespace=argocd \
   --set 'clusters[0].id=customer-a' \
   --set 'clusters[0].token=<generate-agent-token>'
 ```
+
+> **mTLS is required for production.** The public port serves agent WebSocket
+> connections and must be protected with mutual TLS. Without mTLS, anyone who
+> can reach the public port could attempt to connect. See the
+> [mTLS section](#mtls-mutual-tls) for certificate setup.
 
 **Customer cluster** (agent — fully automated, only needs the agent token):
 
@@ -129,7 +166,9 @@ helm install proxy-agent \
   oci://ghcr.io/cloud-exit/charts/argocd-cluster-proxy-agent \
   --namespace proxy-system --create-namespace \
   --set serverURL=wss://proxy.management.example.com/connect \
-  --set token=<same-agent-token-as-above>
+  --set token=<same-agent-token-as-above> \
+  --set tls.serverCASecret=proxy-server-ca \
+  --set tls.clientCertSecret=proxy-client-tls
 ```
 
 The agent chart automatically creates:
@@ -145,13 +184,12 @@ so ArgoCD discovers the proxied clusters automatically.
 
 ```bash
 # On the management cluster — readyz returns "ok" when at least one agent is connected
-kubectl -n proxy-system port-forward svc/proxy-server 8080
+kubectl -n proxy-system port-forward svc/proxy-server-internal 8080
 curl http://localhost:8080/readyz
 # ok
 
-# List namespaces on the customer cluster through the proxy
-curl -H "Authorization: Bearer <proxy-token>" \
-  http://localhost:8080/tunnel/customer-a/api/v1/namespaces
+# List namespaces on the customer cluster through the proxy (via internal service)
+curl http://localhost:8080/tunnel/customer-a/api/v1/namespaces
 ```
 
 ## ArgoCD integration
@@ -170,19 +208,23 @@ metadata:
 type: Opaque
 stringData:
   name: customer-a
-  server: "http://proxy-server.proxy-system.svc:8080/tunnel/customer-a"
+  server: "http://proxy-server-internal.proxy-system.svc:8080/tunnel/customer-a"
   config: |
     {
-      "bearerToken": "<proxy-token>",
       "tlsClientConfig": { "insecure": true }
     }
 ```
 
 ArgoCD picks this up automatically and treats each proxied cluster as a regular
-remote cluster. The `bearerToken` authenticates to the proxy server — it is
-stripped before tunneling and the agent injects the real K8s SA token on the
-customer side. `insecure: true` is safe here because traffic stays on the
+remote cluster. No bearer token is needed — the `/tunnel/` endpoint is served
+on the internal service (`proxy-server-internal`), which is only reachable from
+within the cluster. The agent injects the real K8s SA token on the customer
+side. `insecure: true` is safe here because traffic stays on the
 cluster-internal network.
+
+> **With mTLS enabled**, the cluster secret URL switches to `https://` and
+> includes `caData`, `certData`, and `keyData` so ArgoCD presents a client
+> certificate. See the [mTLS section](#mtls-mutual-tls) for setup details.
 
 ### Example: deploying an application through the proxy
 
@@ -218,7 +260,7 @@ Alternatively, reference the cluster by its proxy URL directly:
 
 ```yaml
   destination:
-    server: http://proxy-server.proxy-system.svc:8080/tunnel/customer-a
+    server: http://proxy-server-internal.proxy-system.svc:8080/tunnel/customer-a
     namespace: default
 ```
 
@@ -233,7 +275,9 @@ Register multiple customer clusters in a single server deployment:
 helm install proxy-server \
   oci://ghcr.io/cloud-exit/charts/argocd-cluster-proxy-server \
   --namespace proxy-system --create-namespace \
-  --set proxyToken=<proxy-token> \
+  --set tls.enabled=true \
+  --set tls.certSecret=proxy-server-tls \
+  --set tls.clientCASecret=proxy-ca-keypair \
   --set argocd.enabled=true \
   --set 'clusters[0].id=staging' \
   --set 'clusters[0].token=<staging-token>' \
@@ -273,6 +317,346 @@ spec:
           selfHeal: true
 ```
 
+## mTLS (mutual TLS)
+
+mTLS adds cryptographic identity verification to both server ports. Even if an
+attacker discovers the endpoint, they cannot connect without the correct client
+certificate. **mTLS is required for production** — it is the primary
+authentication mechanism for the public-facing port. When no TLS flags or Helm
+values are set, the server runs plain HTTP (suitable for dev/test only).
+
+### How it works
+
+```
+Agent (customer cluster)                    Server (management cluster)
+┌──────────────────────┐                    ┌──────────────────────────┐
+│ client cert + key    │ ── TLS handshake → │ server cert + key        │
+│ server CA cert       │                    │ client CA cert           │
+│                      │ ← verify server ── │                          │
+│                      │ ── verify client → │                          │
+│                      │                    │                          │
+│ WebSocket tunnel     │ ◀═══════════════▶  │ /connect (public port)   │
+└──────────────────────┘                    └──────────────────────────┘
+
+ArgoCD                                      Server (management cluster)
+┌──────────────────────┐                    ┌──────────────────────────┐
+│ client cert + key    │ ── TLS handshake → │ server cert + key        │
+│ server CA cert       │                    │ client CA cert           │
+│                      │ ← verify server ── │                          │
+│                      │ ── verify client → │                          │
+│                      │                    │                          │
+│ HTTP proxy requests  │ ═══════════════▶   │ /tunnel/* (internal port)│
+└──────────────────────┘                    └──────────────────────────┘
+```
+
+Both the agent (public port) and ArgoCD (internal port) present client
+certificates. The server verifies them against the client CA before accepting
+any connection.
+
+### Setup with cert-manager
+
+[cert-manager](https://cert-manager.io) automates certificate issuance and
+rotation. The examples below create a self-signed CA and issue server/client
+certificates from it.
+
+#### 1. Install cert-manager (if not already present)
+
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+```
+
+#### 2. Create a CA Issuer (management cluster)
+
+```yaml
+# ca-issuer.yaml — deploy in the proxy-system namespace
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: proxy-ca-issuer
+  namespace: proxy-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: proxy-ca
+  namespace: proxy-system
+spec:
+  isCA: true
+  commonName: proxy-ca
+  secretName: proxy-ca-keypair
+  duration: 87600h   # 10 years
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: proxy-ca-issuer
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: proxy-ca
+  namespace: proxy-system
+spec:
+  ca:
+    secretName: proxy-ca-keypair
+```
+
+#### 3. Issue the server certificate
+
+```yaml
+# server-cert.yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: proxy-server-tls
+  namespace: proxy-system
+spec:
+  secretName: proxy-server-tls
+  duration: 8760h    # 1 year
+  renewBefore: 720h  # 30 days
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - server auth
+  dnsNames:
+    - proxy-server
+    - proxy-server.proxy-system.svc
+    - proxy-server.proxy-system.svc.cluster.local
+    - proxy-server-internal.proxy-system.svc
+    - proxy-server-internal.proxy-system.svc.cluster.local
+    # Add your public DNS name if agents connect via Ingress:
+    # - proxy.management.example.com
+  issuerRef:
+    name: proxy-ca
+    kind: Issuer
+```
+
+#### 4. Issue a client certificate for the agent
+
+```yaml
+# agent-client-cert.yaml — deploy in the proxy-system namespace on the
+# management cluster, then copy the Secret to the customer cluster.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: proxy-agent-client
+  namespace: proxy-system
+spec:
+  secretName: proxy-agent-client-tls
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - client auth
+  commonName: proxy-agent
+  issuerRef:
+    name: proxy-ca
+    kind: Issuer
+```
+
+#### 5. Issue a client certificate for ArgoCD
+
+```yaml
+# argocd-client-cert.yaml — deploy in the ArgoCD namespace
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: proxy-argocd-client
+  namespace: argocd
+spec:
+  secretName: proxy-argocd-client-tls
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - client auth
+  commonName: argocd
+  issuerRef:
+    name: proxy-ca
+    kind: Issuer
+    group: cert-manager.io
+```
+
+> **Note:** The ArgoCD Certificate references the CA Issuer in `proxy-system`.
+> If ArgoCD runs in a different namespace, use a `ClusterIssuer` instead of a
+> namespaced `Issuer`, or copy the CA Secret across namespaces.
+
+#### 6. Copy certs to the customer cluster
+
+The agent needs the CA cert (to verify the server) and its client cert+key.
+Extract them from the management cluster and create secrets on the customer side:
+
+```bash
+# Extract from management cluster
+kubectl -n proxy-system get secret proxy-ca-keypair \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/ca.crt
+
+kubectl -n proxy-system get secret proxy-agent-client-tls \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/client.crt
+kubectl -n proxy-system get secret proxy-agent-client-tls \
+  -o jsonpath='{.data.tls\.key}' | base64 -d > /tmp/client.key
+
+# Create on customer cluster
+kubectl --context customer-cluster -n proxy-system create secret generic proxy-server-ca \
+  --from-file=ca.crt=/tmp/ca.crt
+
+kubectl --context customer-cluster -n proxy-system create secret tls proxy-client-tls \
+  --cert=/tmp/client.crt --key=/tmp/client.key
+
+rm /tmp/ca.crt /tmp/client.crt /tmp/client.key
+```
+
+> For automated rotation, consider using a tool like
+> [kubed](https://github.com/kubeops/kubed) or
+> [reflector](https://github.com/emberstack/kubernetes-reflector) to sync
+> secrets across clusters.
+
+#### 7. Deploy with Helm
+
+**Management cluster (server):**
+
+```bash
+helm install proxy-server \
+  oci://ghcr.io/cloud-exit/charts/argocd-cluster-proxy-server \
+  --namespace proxy-system --create-namespace \
+  --set argocd.enabled=true \
+  --set argocd.namespace=argocd \
+  --set 'clusters[0].id=customer-a' \
+  --set 'clusters[0].token=<agent-token>' \
+  --set tls.enabled=true \
+  --set tls.certSecret=proxy-server-tls \
+  --set tls.clientCASecret=proxy-ca-keypair
+```
+
+This mounts the server certificate at `/tls/` and the client CA at
+`/tls-client-ca/`, and passes `-tls-cert`, `-tls-key`, `-tls-client-ca` flags
+to the server binary.
+
+**Customer cluster (agent):**
+
+```bash
+helm install proxy-agent \
+  oci://ghcr.io/cloud-exit/charts/argocd-cluster-proxy-agent \
+  --namespace proxy-system --create-namespace \
+  --set serverURL=wss://proxy.management.example.com/connect \
+  --set token=<agent-token> \
+  --set tls.serverCASecret=proxy-server-ca \
+  --set tls.clientCertSecret=proxy-client-tls
+```
+
+This mounts the server CA at `/tls-server-ca/` and the client cert at
+`/tls-client/`, and passes `-server-ca-cert`, `-client-cert`, `-client-key`
+flags to the agent binary.
+
+#### 8. Configure ArgoCD cluster secrets for mTLS
+
+When `tls.enabled=true`, the server chart automatically switches ArgoCD cluster
+secret URLs from `http://` to `https://`. To supply ArgoCD's client cert for
+mTLS, pass the base64-encoded cert and key:
+
+```bash
+# Extract base64-encoded values
+ARGO_CA=$(kubectl -n proxy-system get secret proxy-ca-keypair \
+  -o jsonpath='{.data.ca\.crt}')
+ARGO_CERT=$(kubectl -n argocd get secret proxy-argocd-client-tls \
+  -o jsonpath='{.data.tls\.crt}')
+ARGO_KEY=$(kubectl -n argocd get secret proxy-argocd-client-tls \
+  -o jsonpath='{.data.tls\.key}')
+
+helm upgrade proxy-server \
+  oci://ghcr.io/cloud-exit/charts/argocd-cluster-proxy-server \
+  --namespace proxy-system \
+  --reuse-values \
+  --set argocd.caData="$ARGO_CA" \
+  --set argocd.clientCertData="$ARGO_CERT" \
+  --set argocd.clientKeyData="$ARGO_KEY"
+```
+
+The resulting ArgoCD cluster secret will contain:
+
+```json
+{
+  "tlsClientConfig": {
+    "insecure": false,
+    "caData": "<base64 CA>",
+    "certData": "<base64 client cert>",
+    "keyData": "<base64 client key>"
+  }
+}
+```
+
+### Verifying the setup
+
+```bash
+# Check that the server rejects connections without a client cert
+curl --cacert /tmp/ca.crt https://proxy.management.example.com/healthz
+# Expected: SSL handshake error (certificate required)
+
+# Check that the server accepts connections with a valid client cert
+curl --cacert /tmp/ca.crt \
+     --cert /tmp/client.crt --key /tmp/client.key \
+     https://proxy.management.example.com/healthz
+# Expected: ok
+
+# Check that the agent connected
+kubectl -n proxy-system port-forward svc/proxy-server-internal 8080
+curl --cacert /tmp/ca.crt \
+     --cert /tmp/client.crt --key /tmp/client.key \
+     https://localhost:8080/readyz
+# Expected: ok
+```
+
+### Helm values reference
+
+**Server chart (`argocd-cluster-proxy-server`):**
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `tls.enabled` | `false` | Enable TLS on both ports |
+| `tls.certSecret` | `""` | Secret with `tls.crt` and `tls.key` for the server |
+| `tls.clientCASecret` | `""` | Secret with `ca.crt` for client verification (mTLS) |
+| `argocd.caData` | `""` | Base64 CA cert for ArgoCD to verify the server |
+| `argocd.clientCertData` | `""` | Base64 client cert for ArgoCD mTLS |
+| `argocd.clientKeyData` | `""` | Base64 client key for ArgoCD mTLS |
+
+**Agent chart (`argocd-cluster-proxy-agent`):**
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `tls.serverCASecret` | `""` | Secret with `ca.crt` to verify the proxy server |
+| `tls.clientCertSecret` | `""` | Secret with `tls.crt` and `tls.key` for mTLS |
+
+### Without cert-manager
+
+If you manage certificates manually (e.g. with OpenSSL), create the Kubernetes
+secrets directly:
+
+```bash
+# Server cert
+kubectl -n proxy-system create secret tls proxy-server-tls \
+  --cert=server.crt --key=server.key
+
+# Client CA (for mTLS verification)
+kubectl -n proxy-system create secret generic proxy-client-ca \
+  --from-file=ca.crt=ca.crt
+
+# Agent client cert (on customer cluster)
+kubectl -n proxy-system create secret generic proxy-server-ca \
+  --from-file=ca.crt=ca.crt
+kubectl -n proxy-system create secret tls proxy-client-tls \
+  --cert=client.crt --key=client.key
+```
+
+Then use the same Helm `--set tls.*` values as shown above.
+
 ## High availability
 
 ### How sessions work
@@ -298,7 +682,9 @@ helm install proxy-server \
   --set replicas=1 \
   --set pdb.enabled=true \
   --set pdb.minAvailable=0 \
-  --set proxyToken=<token> \
+  --set tls.enabled=true \
+  --set tls.certSecret=proxy-server-tls \
+  --set tls.clientCASecret=proxy-ca-keypair \
   --set 'clusters[0].id=customer-a' \
   --set 'clusters[0].token=<agent-token>' \
   --set argocd.enabled=true
@@ -421,10 +807,13 @@ outages result in transient sync failures, not data loss.
 
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
-| `-addr` | | `:8080` | Listen address |
+| `-addr` | | `:8443` | Public listen address (agent `/connect`) |
+| `-internal-addr` | | `:8080` | Internal listen address (`/tunnel`, `/metrics`) |
 | `-clusters` | `CLUSTERS` | | Path to clusters JSON file (or JSON string via env) |
-| `-proxy-token` | `PROXY_TOKEN` | | Bearer token required on /tunnel/ requests |
 | `-rate-limit` | | `0` | Max proxy requests per second (0 = unlimited) |
+| `-tls-cert` | | | Path to TLS certificate (enables TLS on both ports) |
+| `-tls-key` | | | Path to TLS private key |
+| `-tls-client-ca` | | | Path to CA cert for client verification (enables mTLS) |
 | `-log-level` | | `info` | Log level (debug, info, warn, error) |
 
 Clusters JSON format:
@@ -450,6 +839,9 @@ Clusters JSON format:
 | `-insecure` | | `false` | Skip TLS verification to local API |
 | `-plain-target` | | `false` | Connect without TLS (testing only) |
 | `-allow-insecure-server` | | `false` | Allow plaintext ws:// (testing only) |
+| `-server-ca-cert` | | | CA cert for verifying the proxy server's TLS certificate |
+| `-client-cert` | | | Client certificate for mTLS to the proxy server |
+| `-client-key` | | | Client private key for mTLS |
 | `-max-retry` | | `60s` | Max reconnect backoff |
 | `-health-addr` | | `:8081` | Health/metrics server address |
 | `-log-level` | | `info` | Log level |
@@ -486,7 +878,7 @@ Prometheus scraping is enabled via pod annotations:
 
 ```yaml
 prometheus.io/scrape: "true"
-prometheus.io/port: "8080"   # server
+prometheus.io/port: "8080"   # server (internal port)
 prometheus.io/port: "8081"   # agent
 prometheus.io/path: "/metrics"
 ```
@@ -510,13 +902,13 @@ Terminal 1 — Server:
 cat > /tmp/clusters.json << 'EOF'
 [{"id": "dev", "token": "dev-token", "targetAddr": "127.0.0.1:6443"}]
 EOF
-go run ./cmd/server -addr :8080 -clusters /tmp/clusters.json -log-level debug
+go run ./cmd/server -addr :8443 -internal-addr :8080 -clusters /tmp/clusters.json -log-level debug
 ```
 
 Terminal 2 — Agent:
 ```bash
 go run ./cmd/agent \
-  -server ws://localhost:8080/connect \
+  -server ws://localhost:8443/connect \
   -token dev-token \
   -target kubernetes.default.svc:443 \
   -allow-insecure-server \
@@ -525,6 +917,7 @@ go run ./cmd/agent \
 
 Terminal 3 — Test:
 ```bash
+# Use the internal port for tunnel requests
 curl http://localhost:8080/tunnel/dev/api/v1/namespaces
 ```
 

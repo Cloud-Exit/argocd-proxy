@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -30,11 +33,6 @@ type Server struct {
 	upgrader websocket.Upgrader
 	log      *slog.Logger
 
-	// ProxyToken is reserved for future use. Proxy token auth on /tunnel/
-	// requests was removed because ArgoCD's internal sync code paths do
-	// not consistently send the cluster bearer token for all HTTP methods.
-	ProxyToken string
-
 	// limiter rate-limits proxy requests. Nil means unlimited.
 	limiter *rate.Limiter
 
@@ -47,12 +45,6 @@ type Server struct {
 
 // Option configures the server.
 type Option func(*Server)
-
-// WithProxyToken sets a bearer token required on /tunnel/ requests.
-// [C2 fix: authenticate the proxy endpoint]
-func WithProxyToken(token string) Option {
-	return func(s *Server) { s.ProxyToken = token }
-}
 
 // WithRateLimit sets a per-server rate limit in requests per second.
 // A value of 0 means unlimited (default).
@@ -86,32 +78,59 @@ func New(reg *Registry, logger *slog.Logger, opts ...Option) *Server {
 	return s
 }
 
-// Handler returns an http.Handler that serves both the agent tunnel endpoint
-// and the ArgoCD proxy endpoint.
-//
-//	GET /connect          — agent WebSocket tunnel
-//	ANY /tunnel/{id}/...  — reverse-proxied to the remote cluster
-//	GET /healthz          — liveness probe
-//	GET /readyz           — readiness (at least one cluster connected)
+// Handler returns an http.Handler that serves all endpoints on a single port.
+// Retained for backward compatibility and tests.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/connect", s.handleConnect)
 	mux.HandleFunc("/tunnel/", s.handleProxy)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if len(s.registry.Connected()) > 0 {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("no clusters connected"))
-		}
-	})
+	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/readyz", s.handleReadyz)
 	mux.Handle("/metrics", promhttp.Handler())
 	return mux
+}
+
+// PublicHandler returns a handler for the public-facing port.
+// Only agent WebSocket connections and health checks are served here.
+//
+//	GET /connect  — agent WebSocket tunnel (authenticated with agent token)
+//	GET /healthz  — liveness probe
+func (s *Server) PublicHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/connect", s.handleConnect)
+	mux.HandleFunc("/healthz", s.handleHealthz)
+	return mux
+}
+
+// InternalHandler returns a handler for the internal (ClusterIP-only) port.
+// Serves proxy traffic, readiness, and metrics — not exposed via Ingress.
+//
+//	ANY /tunnel/{id}/...  — reverse-proxied to the remote cluster
+//	GET /healthz          — liveness probe
+//	GET /readyz           — readiness (at least one cluster connected)
+//	GET /metrics          — Prometheus metrics
+func (s *Server) InternalHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tunnel/", s.handleProxy)
+	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/readyz", s.handleReadyz)
+	mux.Handle("/metrics", promhttp.Handler())
+	return mux
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	if len(s.registry.Connected()) > 0 {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("no clusters connected"))
+	}
 }
 
 // ---------- agent tunnel endpoint ----------
@@ -199,14 +218,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-
-	// Proxy token auth is intentionally NOT enforced on /tunnel/ requests.
-	// ArgoCD's internal code paths (sync, validation, discovery) do not
-	// consistently send the cluster bearer token for all HTTP methods.
-	// Security is provided by:
-	//   - Agent token authentication at /connect (WebSocket handshake)
-	//   - Agent-injected ServiceAccount token + K8s RBAC
-	//   - Network isolation (ClusterIP service + optional NetworkPolicy)
 
 	r.Body = http.MaxBytesReader(w, r.Body, MaxProxyBodySize)
 
@@ -464,6 +475,55 @@ func ListenAndServe(ctx context.Context, addr string, handler http.Handler) erro
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutCtx)
+	}
+}
+
+// TLSConfig holds TLS certificate paths for the server.
+type TLSConfig struct {
+	CertFile string // path to TLS certificate
+	KeyFile  string // path to TLS private key
+	CAFile   string // path to CA cert for client verification (mTLS)
+}
+
+// ListenAndServeTLS starts the proxy server with TLS. If CAFile is set, the
+// server requires and verifies client certificates (mTLS). It blocks until
+// the context is cancelled, then gracefully shuts down.
+func ListenAndServeTLS(ctx context.Context, addr string, handler http.Handler, tc TLSConfig) error {
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	if tc.CAFile != "" {
+		caCert, err := os.ReadFile(tc.CAFile)
+		if err != nil {
+			return fmt.Errorf("read client CA %s: %w", tc.CAFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			return fmt.Errorf("failed to parse client CA %s", tc.CAFile)
+		}
+		tlsCfg.ClientCAs = pool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServeTLS(tc.CertFile, tc.KeyFile) }()
 
 	select {
 	case err := <-errCh:

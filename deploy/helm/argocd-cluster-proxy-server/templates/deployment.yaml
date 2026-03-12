@@ -16,7 +16,7 @@ spec:
       annotations:
         checksum/clusters: {{ include (print $.Template.BasePath "/clusters-secret.yaml") . | sha256sum }}
         prometheus.io/scrape: "true"
-        prometheus.io/port: "{{ .Values.port }}"
+        prometheus.io/port: "{{ .Values.internalPort }}"
         prometheus.io/path: "/metrics"
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -43,22 +43,33 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - -addr=:{{ .Values.port }}
+            - -internal-addr=:{{ .Values.internalPort }}
             - -clusters=/config/clusters.json
             - -log-level={{ .Values.logLevel }}
+            {{- if .Values.tls.enabled }}
+            - -tls-cert=/tls/tls.crt
+            - -tls-key=/tls/tls.key
+            {{- if .Values.tls.clientCASecret }}
+            - -tls-client-ca=/tls-client-ca/ca.crt
+            {{- end }}
+            {{- end }}
           ports:
-            - name: http
+            - name: public
               containerPort: {{ .Values.port }}
+              protocol: TCP
+            - name: internal
+              containerPort: {{ .Values.internalPort }}
               protocol: TCP
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: public
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /healthz
-              port: http
+              path: /readyz
+              port: internal
             initialDelaySeconds: 2
             periodSeconds: 5
           resources:
@@ -67,10 +78,30 @@ spec:
             - name: config
               mountPath: /config
               readOnly: true
+            {{- if .Values.tls.enabled }}
+            - name: tls-cert
+              mountPath: /tls
+              readOnly: true
+            {{- if .Values.tls.clientCASecret }}
+            - name: tls-client-ca
+              mountPath: /tls-client-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
       volumes:
         - name: config
           secret:
             secretName: {{ include "proxy-server.fullname" . }}-clusters
+        {{- if .Values.tls.enabled }}
+        - name: tls-cert
+          secret:
+            secretName: {{ .Values.tls.certSecret }}
+        {{- if .Values.tls.clientCASecret }}
+        - name: tls-client-ca
+          secret:
+            secretName: {{ .Values.tls.clientCASecret }}
+        {{- end }}
+        {{- end }}
       {{- with .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}

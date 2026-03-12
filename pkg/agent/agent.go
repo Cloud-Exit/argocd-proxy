@@ -54,6 +54,13 @@ type Config struct {
 	// plaintext ws:// instead of wss://. Must be set explicitly.
 	AllowInsecureServer bool
 
+	// ServerCACertPath is the CA cert to verify the proxy server's TLS certificate.
+	ServerCACertPath string
+	// ClientCertPath is the client certificate for mTLS to the proxy server.
+	ClientCertPath string
+	// ClientKeyPath is the private key for the client certificate.
+	ClientKeyPath string
+
 	// MaxRetryInterval caps the exponential backoff between reconnection
 	// attempts (default: 60s).
 	MaxRetryInterval time.Duration
@@ -155,9 +162,14 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+a.cfg.Token)
 
+	serverTLS, err := a.buildServerTLSConfig()
+	if err != nil {
+		return fmt.Errorf("server tls config: %w", err)
+	}
+
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
-		TLSClientConfig:  &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSClientConfig:  serverTLS,
 	}
 
 	a.log.Info("connecting", "server", a.cfg.ServerURL)
@@ -274,6 +286,34 @@ func (a *Agent) readSAToken() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+// buildServerTLSConfig builds the TLS config for connecting to the proxy server.
+// It optionally loads a custom CA and client certificate for mTLS.
+func (a *Agent) buildServerTLSConfig() (*tls.Config, error) {
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	if a.cfg.ServerCACertPath != "" {
+		caCert, err := os.ReadFile(a.cfg.ServerCACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("read server CA %s: %w", a.cfg.ServerCACertPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse server CA %s", a.cfg.ServerCACertPath)
+		}
+		tc.RootCAs = pool
+	}
+
+	if a.cfg.ClientCertPath != "" && a.cfg.ClientKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(a.cfg.ClientCertPath, a.cfg.ClientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert: %w", err)
+		}
+		tc.Certificates = []tls.Certificate{cert}
+	}
+
+	return tc, nil
 }
 
 func (a *Agent) buildTLSConfig() (*tls.Config, error) {

@@ -1,3 +1,4 @@
+# Public service — exposed via Ingress for agent connections
 apiVersion: v1
 kind: Service
 metadata:
@@ -8,8 +9,25 @@ spec:
   type: {{ .Values.service.type }}
   ports:
     - port: {{ .Values.service.port }}
-      targetPort: http
+      targetPort: public
       protocol: TCP
-      name: http
+      name: public
+  selector:
+    {{- include "proxy-server.selectorLabels" . | nindent 4 }}
+---
+# Internal service — ClusterIP only, for ArgoCD tunnel access
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "proxy-server.fullname" . }}-internal
+  labels:
+    {{- include "proxy-server.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.service.internalPort }}
+      targetPort: internal
+      protocol: TCP
+      name: internal
   selector:
     {{- include "proxy-server.selectorLabels" . | nindent 4 }}

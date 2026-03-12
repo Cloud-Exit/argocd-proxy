@@ -12,14 +12,20 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Allow all sources on the server port. The proxy server must be reachable
-    # by both ArgoCD (in-cluster) and agents (external/internet), so
-    # namespace-based source restrictions are not practical. Authentication
-    # is handled at the application layer (bearer tokens on the /connect
-    # endpoint).
+    # Public port: agents from anywhere (internet via Ingress controller).
+    # Authentication is handled at the application layer (bearer tokens on
+    # the /connect endpoint).
     - ports:
         - protocol: TCP
           port: {{ .Values.port }}
+    # Internal port: only from ArgoCD namespace.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.internalPort }}
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.argocd.namespace }}
   # Egress: deny all. The server never initiates outbound connections —
   # agents connect inbound via WebSocket, and proxy traffic flows over
   # those established tunnels. Return traffic on accepted connections is
