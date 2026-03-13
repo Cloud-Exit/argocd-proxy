@@ -1,0 +1,34 @@
+{{- if and .Values.gateway.enabled .Values.gateway.create -}}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "proxy-server.fullname" . }}
+  labels:
+    {{- include "proxy-server.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.gateway.certIssuer }}
+    cert-manager.io/cluster-issuer: {{ . }}
+    {{- end }}
+    {{- with .Values.gateway.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  gatewayClassName: {{ .Values.gateway.className }}
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      {{- with .Values.gateway.hostname }}
+      hostname: {{ . | quote }}
+      {{- end }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: {{ .Values.gateway.tls.secretName | default (printf "%s-ingress-tls" (include "proxy-server.fullname" .)) }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- with .Values.gateway.extraListeners }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

@@ -5,12 +5,16 @@ metadata:
   name: {{ include "proxy-server.fullname" . }}
   labels:
     {{- include "proxy-server.labels" . | nindent 4 }}
-  {{- with .Values.gateway.annotations }}
+  {{- with .Values.gateway.route.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
   parentRefs:
+    {{- if .Values.gateway.create }}
+    - name: {{ include "proxy-server.fullname" . }}
+      sectionName: https
+    {{- else }}
     {{- range .Values.gateway.parentRefs }}
     - name: {{ .name }}
       {{- with .namespace }}
@@ -20,9 +24,13 @@ spec:
       sectionName: {{ . }}
       {{- end }}
     {{- end }}
-  {{- with .Values.gateway.hostnames }}
+    {{- end }}
+  {{- if or .Values.gateway.hostname .Values.gateway.hostnames }}
   hostnames:
-    {{- range . }}
+    {{- with .Values.gateway.hostname }}
+    - {{ . | quote }}
+    {{- end }}
+    {{- range .Values.gateway.hostnames }}
     - {{ . | quote }}
     {{- end }}
   {{- end }}

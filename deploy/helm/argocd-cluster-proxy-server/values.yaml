@@ -85,18 +85,38 @@ ingress:
     #   hosts:
     #     - proxy.example.com
 
-# -- Gateway API HTTPRoute. Use this instead of ingress when your cluster
-# uses Gateway API (e.g. Envoy Gateway, Istio, Traefik with Gateway API).
+# -- Gateway API support. Use this instead of ingress when your cluster
+# uses Gateway API (e.g. Traefik, Envoy Gateway, Istio).
 # Only /connect is exposed — /tunnel/ stays internal.
 gateway:
   enabled: false
+  # -- Create a Gateway resource. Set to false to reference an existing gateway
+  # via parentRefs instead.
+  create: true
+  # -- Gateway class (e.g. traefik, istio, envoy-gateway).
+  className: traefik
+  # -- Public hostname for the proxy server.
+  hostname: ""
+  # -- cert-manager ClusterIssuer for automatic TLS certificate provisioning.
+  certIssuer: ""
+  # -- TLS configuration for the Gateway listener.
+  tls:
+    secretName: ""  # defaults to <fullname>-ingress-tls
+  # -- Annotations applied to the Gateway resource.
   annotations: {}
+    # external-dns.alpha.kubernetes.io/hostname: proxy.example.com
+  # -- Additional listeners beyond the default HTTPS listener.
+  extraListeners: []
+  # -- Parent gateway references (only used when create: false).
   parentRefs: []
-    # - name: my-gateway
+    # - name: shared-gateway
     #   namespace: gateway-system
     #   sectionName: https
+  # -- Additional hostnames for the HTTPRoute (beyond gateway.hostname).
   hostnames: []
-    # - proxy.example.com
+  # -- Annotations applied to the HTTPRoute resource.
+  route:
+    annotations: {}
 
 imagePullSecrets: []
 nameOverride: ""
