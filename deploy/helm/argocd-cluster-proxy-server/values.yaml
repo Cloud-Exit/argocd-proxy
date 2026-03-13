@@ -85,6 +85,19 @@ ingress:
     #   hosts:
     #     - proxy.example.com
 
+# -- Gateway API HTTPRoute. Use this instead of ingress when your cluster
+# uses Gateway API (e.g. Envoy Gateway, Istio, Traefik with Gateway API).
+# Only /connect is exposed — /tunnel/ stays internal.
+gateway:
+  enabled: false
+  annotations: {}
+  parentRefs: []
+    # - name: my-gateway
+    #   namespace: gateway-system
+    #   sectionName: https
+  hostnames: []
+    # - proxy.example.com
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
