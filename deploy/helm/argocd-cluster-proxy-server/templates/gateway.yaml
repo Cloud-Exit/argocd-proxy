@@ -5,16 +5,33 @@ metadata:
   name: {{ include "proxy-server.fullname" . }}
   labels:
     {{- include "proxy-server.labels" . | nindent 4 }}
+  {{- $annotations := dict }}
+  {{- if and .Values.gateway.certIssuer (eq .Values.gateway.tlsMode "Terminate") }}
+  {{- $_ := set $annotations "cert-manager.io/cluster-issuer" .Values.gateway.certIssuer }}
+  {{- end }}
+  {{- with .Values.gateway.annotations }}
+  {{- $annotations = merge $annotations . }}
+  {{- end }}
+  {{- with $annotations }}
   annotations:
-    {{- with .Values.gateway.certIssuer }}
-    cert-manager.io/cluster-issuer: {{ . }}
-    {{- end }}
-    {{- with .Values.gateway.annotations }}
     {{- toYaml . | nindent 4 }}
-    {{- end }}
+  {{- end }}
 spec:
   gatewayClassName: {{ .Values.gateway.className }}
   listeners:
+    {{- if eq .Values.gateway.tlsMode "Passthrough" }}
+    - name: tls
+      protocol: TLS
+      port: 443
+      {{- with .Values.gateway.hostname }}
+      hostname: {{ . | quote }}
+      {{- end }}
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- else }}
     - name: https
       protocol: HTTPS
       port: 443
@@ -28,6 +45,7 @@ spec:
       allowedRoutes:
         namespaces:
           from: Same
+    {{- end }}
     {{- with .Values.gateway.extraListeners }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

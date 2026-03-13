@@ -1,6 +1,6 @@
-{{- if and .Values.gateway.enabled (ne .Values.gateway.tlsMode "Passthrough") -}}
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
+{{- if and .Values.gateway.enabled (eq .Values.gateway.tlsMode "Passthrough") -}}
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TLSRoute
 metadata:
   name: {{ include "proxy-server.fullname" . }}
   labels:
@@ -13,7 +13,7 @@ spec:
   parentRefs:
     {{- if .Values.gateway.create }}
     - name: {{ include "proxy-server.fullname" . }}
-      sectionName: https
+      sectionName: tls
     {{- else }}
     {{- range .Values.gateway.parentRefs }}
     - name: {{ .name }}
@@ -35,11 +35,7 @@ spec:
     {{- end }}
   {{- end }}
   rules:
-    - matches:
-        - path:
-            type: Exact
-            value: /connect
-      backendRefs:
+    - backendRefs:
         - name: {{ include "proxy-server.fullname" . }}
           port: {{ .Values.service.port }}
 {{- end }}

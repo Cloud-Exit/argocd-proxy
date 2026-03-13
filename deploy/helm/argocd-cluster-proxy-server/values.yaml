@@ -97,24 +97,33 @@ gateway:
   className: traefik
   # -- Public hostname for the proxy server.
   hostname: ""
+  # -- TLS mode for the Gateway listener:
+  #   Terminate   — Gateway terminates TLS and forwards plain HTTP to the server.
+  #                 Use with HTTPRoute. Requires gateway.tls.secretName or certIssuer.
+  #   Passthrough — Gateway passes TLS through to the server untouched.
+  #                 Use with TLSRoute. Required for mTLS (the server must see the
+  #                 client certificate). The server handles TLS termination itself
+  #                 (tls.enabled + tls.certSecret must be set).
+  tlsMode: Terminate
   # -- cert-manager ClusterIssuer for automatic TLS certificate provisioning.
+  # Only used when tlsMode: Terminate.
   certIssuer: ""
-  # -- TLS configuration for the Gateway listener.
+  # -- TLS configuration for the Gateway listener (Terminate mode only).
   tls:
     secretName: ""  # defaults to <fullname>-ingress-tls
   # -- Annotations applied to the Gateway resource.
   annotations: {}
     # external-dns.alpha.kubernetes.io/hostname: proxy.example.com
-  # -- Additional listeners beyond the default HTTPS listener.
+  # -- Additional listeners beyond the default listener.
   extraListeners: []
   # -- Parent gateway references (only used when create: false).
   parentRefs: []
     # - name: shared-gateway
     #   namespace: gateway-system
     #   sectionName: https
-  # -- Additional hostnames for the HTTPRoute (beyond gateway.hostname).
+  # -- Additional hostnames for the route (beyond gateway.hostname).
   hostnames: []
-  # -- Annotations applied to the HTTPRoute resource.
+  # -- Annotations applied to the HTTPRoute/TLSRoute resource.
   route:
     annotations: {}
 
