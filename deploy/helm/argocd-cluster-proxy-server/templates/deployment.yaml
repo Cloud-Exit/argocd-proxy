@@ -63,7 +63,7 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: public
+              port: internal
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
