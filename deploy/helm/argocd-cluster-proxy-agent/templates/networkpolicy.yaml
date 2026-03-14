@@ -37,14 +37,22 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: default
-    # Allow egress to the proxy server (external, typically over the internet).
-    {{- with .Values.networkPolicy.proxyServerCIDR }}
+    # Allow egress to the proxy server. Security is enforced by mTLS —
+    # the agent must present a valid client certificate to connect.
+    {{- if .Values.networkPolicy.proxyServerCIDR }}
     - ports:
         - protocol: TCP
           port: 443
       to:
         - ipBlock:
-            cidr: {{ . }}
+            cidr: {{ .Values.networkPolicy.proxyServerCIDR }}
+    {{- else }}
+    # No proxyServerCIDR set — allow HTTPS egress to any destination so the
+    # agent can reach the proxy server. Set networkPolicy.proxyServerCIDR to
+    # restrict this to the server's IP.
+    - ports:
+        - protocol: TCP
+          port: 443
     {{- end }}
     {{- with .Values.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}

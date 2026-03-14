@@ -61,14 +61,12 @@ spec:
               containerPort: {{ .Values.internalPort }}
               protocol: TCP
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: internal
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
-            httpGet:
-              path: /readyz
+            tcpSocket:
               port: internal
             initialDelaySeconds: 2
             periodSeconds: 5
