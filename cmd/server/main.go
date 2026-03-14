@@ -22,7 +22,7 @@ func main() {
 		internalAddr = flag.String("internal-addr", ":8080", "internal listen address (/tunnel, /metrics)")
 		clustersFile = flag.String("clusters", "", "path to clusters config JSON file")
 		rateLimit    = flag.Float64("rate-limit", 0, "max proxy requests per second (0 = unlimited)")
-		tlsCert      = flag.String("tls-cert", "", "path to TLS certificate (enables TLS on both ports)")
+		tlsCert      = flag.String("tls-cert", "", "path to TLS certificate (enables TLS on public port)")
 		tlsKey       = flag.String("tls-key", "", "path to TLS private key")
 		tlsClientCA  = flag.String("tls-client-ca", "", "path to CA cert for client verification (enables mTLS)")
 		logLevel     = flag.String("log-level", "info", "log level (debug, info, warn, error)")
@@ -70,6 +70,9 @@ func main() {
 	)
 
 	errCh := make(chan error, 2)
+	// Internal port always serves plain HTTP — it's ClusterIP-only and
+	// needs to be reachable by kubelet probes and Prometheus without TLS.
+	go func() { errCh <- server.ListenAndServe(ctx, *internalAddr, srv.InternalHandler()) }()
 	if useTLS {
 		tc := server.TLSConfig{
 			CertFile: *tlsCert,
@@ -77,10 +80,8 @@ func main() {
 			CAFile:   *tlsClientCA,
 		}
 		go func() { errCh <- server.ListenAndServeTLS(ctx, *addr, srv.PublicHandler(), tc) }()
-		go func() { errCh <- server.ListenAndServeTLS(ctx, *internalAddr, srv.InternalHandler(), tc) }()
 	} else {
 		go func() { errCh <- server.ListenAndServe(ctx, *addr, srv.PublicHandler()) }()
-		go func() { errCh <- server.ListenAndServe(ctx, *internalAddr, srv.InternalHandler()) }()
 	}
 
 	// Wait for the first server to return (shutdown or error).
