@@ -127,6 +127,11 @@ gateway:
   route:
     annotations: {}
 
+networkPolicy:
+  enabled: true
+  # -- Additional egress rules beyond DNS and K8s API.
+  extraEgress: []
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""

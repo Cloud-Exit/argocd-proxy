@@ -79,6 +79,7 @@ rbac:
       verbs: ["*"]
 
 networkPolicy:
+  enabled: true
   # -- CIDR of the proxy server (e.g. "203.0.113.10/32"). Required so the
   # agent can reach the management cluster.
   proxyServerCIDR: ""

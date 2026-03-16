@@ -1,3 +1,4 @@
+{{- if .Values.networkPolicy.enabled -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -13,8 +14,8 @@ spec:
     - Egress
   ingress:
     # Public port: agents from anywhere (internet via Ingress controller).
-    # Authentication is handled at the application layer (bearer tokens on
-    # the /connect endpoint).
+    # Authentication is handled at the application layer (mTLS + bearer tokens
+    # on the /connect endpoint).
     - ports:
         - protocol: TCP
           port: {{ .Values.port }}
@@ -26,8 +27,22 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Values.argocd.namespace }}
-  # Egress: deny all. The server never initiates outbound connections —
-  # agents connect inbound via WebSocket, and proxy traffic flows over
-  # those established tunnels. Return traffic on accepted connections is
-  # handled by conntrack (all major CNIs: Calico, Cilium, Weave, Antrea).
-  egress: []
+  egress:
+    # Allow DNS resolution.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow egress to the Kubernetes API (kubernetes.default.svc:443).
+    - ports:
+        - protocol: TCP
+          port: 443
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
