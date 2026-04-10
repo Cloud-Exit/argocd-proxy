@@ -81,6 +81,10 @@ func (c *Config) defaults() {
 	}
 }
 
+// LivenessTimeout is how long the agent tolerates being disconnected from
+// the server before the liveness probe fails. Kubernetes will restart the pod.
+const LivenessTimeout = 30 * time.Second
+
 // Agent connects to the proxy server and tunnels Kubernetes API requests to
 // the local cluster, injecting its own ServiceAccount credentials so that no
 // customer cluster credentials need to exist on the management side.
@@ -89,10 +93,29 @@ type Agent struct {
 	tlsConfig *tls.Config
 	log       *slog.Logger
 	connected atomic.Bool
+
+	// lastConnectedTime tracks when the agent last had an active connection.
+	// Used by the liveness probe to restart if disconnected too long.
+	lastConnectedTime atomic.Int64 // unix timestamp in nanoseconds
 }
 
 // IsConnected returns whether the agent is currently connected to the server.
 func (a *Agent) IsConnected() bool { return a.connected.Load() }
+
+// IsLive returns true if the agent is connected, or has been disconnected for
+// less than LivenessTimeout. Returns false when the agent has been unable to
+// reach the server for too long, signaling Kubernetes to restart the pod.
+func (a *Agent) IsLive() bool {
+	if a.connected.Load() {
+		return true
+	}
+	last := a.lastConnectedTime.Load()
+	if last == 0 {
+		// Never connected yet — give it time to establish the first connection.
+		return true
+	}
+	return time.Since(time.Unix(0, last)) <= LivenessTimeout
+}
 
 // New creates a new agent.
 func New(cfg Config, logger *slog.Logger) (*Agent, error) {
@@ -185,12 +208,14 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 	sess.OnConnect = a.handleConnect
 
 	a.connected.Store(true)
+	a.lastConnectedTime.Store(time.Now().UnixNano())
 	metrics.AgentConnected.Set(1)
 	a.log.Info("connected")
 
 	err = sess.Serve(ctx)
 
 	a.connected.Store(false)
+	a.lastConnectedTime.Store(time.Now().UnixNano())
 	metrics.AgentConnected.Set(0)
 	return err
 }

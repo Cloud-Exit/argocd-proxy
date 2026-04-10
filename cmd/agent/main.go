@@ -92,8 +92,13 @@ func main() {
 	if *healthAddr != "" {
 		healthMux := http.NewServeMux()
 		healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
+			if a.IsLive() {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+			} else {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("not connected to server"))
+			}
 		})
 		healthMux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 			if a.IsConnected() {
