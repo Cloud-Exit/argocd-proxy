@@ -68,7 +68,7 @@ spec:
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /readyz
+              path: /healthz
               port: internal
             initialDelaySeconds: 2
             periodSeconds: 5
