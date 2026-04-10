@@ -231,14 +231,24 @@ spec:
         image: %s
         imagePullPolicy: Never
         args:
-        - -addr=:8080
+        - -addr=:8443
+        - -internal-addr=:8080
         - -clusters=/config/clusters.json
         - -log-level=debug
         ports:
+        - containerPort: 8443
+          name: public
         - containerPort: 8080
+          name: internal
         volumeMounts:
         - name: config
           mountPath: /config
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /healthz
@@ -259,7 +269,11 @@ spec:
   selector:
     app: proxy-server
   ports:
-  - port: 8080
+  - name: public
+    port: 8443
+    targetPort: 8443
+  - name: internal
+    port: 8080
     targetPort: 8080
 `, namespace, namespace, testToken, namespace, serverImage, namespace)
 
@@ -288,10 +302,11 @@ func deployAgent() error {
 	// Instead, use a NodePort or the control-plane IP with port-forward.
 	// Simplest: create the proxy-server as a NodePort and use mgmt control-plane IP.
 
-	// Patch server service to NodePort.
+	// Patch server service to expose the public port as a NodePort so the
+	// agent on the workload cluster can reach /connect.
 	_ = run("kubectl", "--context", "kind-"+mgmtCluster, "-n", namespace,
 		"patch", "svc", "proxy-server", "-p",
-		`{"spec":{"type":"NodePort","ports":[{"port":8080,"targetPort":8080,"nodePort":30080}]}}`)
+		`{"spec":{"type":"NodePort","ports":[{"name":"public","port":8443,"targetPort":8443,"nodePort":30080},{"name":"internal","port":8080,"targetPort":8080}]}}`)
 
 	// The agent needs a ServiceAccount with permissions to read the local
 	// K8s API. For testing, we'll use the default SA and pass --insecure.

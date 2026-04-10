@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cloud-exit/argocd-cluster-proxy/pkg/certwatch"
 	"github.com/cloud-exit/argocd-cluster-proxy/pkg/server"
 )
 
@@ -68,6 +69,11 @@ func main() {
 		"mtls", useTLS && *tlsClientCA != "",
 		"version", version,
 	)
+
+	// Watch TLS certificate files for rotation and trigger graceful restart.
+	if useTLS {
+		go certwatch.Watch(ctx, logger, cancel, *tlsCert, *tlsKey, *tlsClientCA)
+	}
 
 	errCh := make(chan error, 2)
 	// Internal port always serves plain HTTP — it's ClusterIP-only and

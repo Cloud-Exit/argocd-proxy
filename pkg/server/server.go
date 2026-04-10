@@ -41,6 +41,11 @@ type Server struct {
 	// stopCh is closed on shutdown to signal active sessions to stop.
 	stopCh   chan struct{}
 	stopOnce sync.Once
+
+	// lastAgentTime tracks when an agent was last connected. Used by the
+	// liveness probe to restart the server if agents have been absent too long.
+	lastAgentMu   sync.Mutex
+	lastAgentTime time.Time
 }
 
 // Option configures the server.
@@ -118,9 +123,41 @@ func (s *Server) InternalHandler() http.Handler {
 	return mux
 }
 
+// LivenessTimeout is how long the server tolerates having no connected agents
+// before the liveness probe fails. Kubernetes will restart the pod.
+const LivenessTimeout = 30 * time.Second
+
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	// If agents are currently connected, we're healthy.
+	if len(s.registry.Connected()) > 0 {
+		s.touchAgentTime()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+		return
+	}
+
+	// No agents connected — check how long it's been.
+	s.lastAgentMu.Lock()
+	last := s.lastAgentTime
+	s.lastAgentMu.Unlock()
+
+	// Grace period: if we never had an agent (startup), use server start behavior —
+	// lastAgentTime is zero, so we allow LivenessTimeout from process start.
+	if last.IsZero() || time.Since(last) <= LivenessTimeout {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+		return
+	}
+
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte("no agents connected"))
+}
+
+// touchAgentTime updates the last-agent-connected timestamp.
+func (s *Server) touchAgentTime() {
+	s.lastAgentMu.Lock()
+	s.lastAgentTime = time.Now()
+	s.lastAgentMu.Unlock()
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
@@ -173,6 +210,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	log := s.log.With("cluster", clusterID)
 	log.Info("agent connected")
 	metrics.AgentsConnected.Inc()
+	s.touchAgentTime()
 
 	sess := tunnel.NewSession(ws, log)
 	sess.OnConnect = s.makeAgentConnectHandler(clusterID)
@@ -190,6 +228,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.Drain(5 * time.Second)
 	s.registry.Detach(clusterID)
+	s.touchAgentTime()
 	metrics.AgentsConnected.Dec()
 	log.Info("agent session ended")
 }
