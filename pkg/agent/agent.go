@@ -64,6 +64,10 @@ type Config struct {
 	// MaxRetryInterval caps the exponential backoff between reconnection
 	// attempts (default: 60s).
 	MaxRetryInterval time.Duration
+
+	// MaxConcurrentConnections caps concurrent proxied requests per tunnel
+	// session on the agent. Defaults to tunnel.DefaultMaxConns.
+	MaxConcurrentConnections int
 }
 
 func (c *Config) defaults() {
@@ -78,6 +82,9 @@ func (c *Config) defaults() {
 	}
 	if c.MaxRetryInterval == 0 {
 		c.MaxRetryInterval = 60 * time.Second
+	}
+	if c.MaxConcurrentConnections == 0 {
+		c.MaxConcurrentConnections = tunnel.DefaultMaxConns
 	}
 }
 
@@ -127,6 +134,9 @@ func New(cfg Config, logger *slog.Logger) (*Agent, error) {
 	// [C3 fix] Reject plaintext server connections unless explicitly allowed.
 	if strings.HasPrefix(cfg.ServerURL, "ws://") && !cfg.AllowInsecureServer {
 		return nil, fmt.Errorf("refusing plaintext ws:// server URL (use wss:// or set AllowInsecureServer)")
+	}
+	if cfg.MaxConcurrentConnections < 0 {
+		return nil, fmt.Errorf("max concurrent connections must be >= 0")
 	}
 
 	a := &Agent{cfg: cfg, log: logger}
@@ -204,7 +214,7 @@ func (a *Agent) connectOnce(ctx context.Context) error {
 	// [H2 fix] Limit inbound WebSocket messages.
 	ws.SetReadLimit(16 << 20)
 
-	sess := tunnel.NewSession(ws, a.log)
+	sess := tunnel.NewSession(ws, a.log, tunnel.WithMaxConns(a.cfg.MaxConcurrentConnections))
 	sess.OnConnect = a.handleConnect
 
 	a.connected.Store(true)
@@ -292,12 +302,20 @@ func (a *Agent) handleConnect(sess *tunnel.Session, connID uint32, addr string) 
 	// Pipe remaining data bidirectionally. For normal requests the response
 	// flows back; for upgrade requests (SPDY/WebSocket) additional frames
 	// are exchanged after the initial handshake.
-	done := make(chan struct{})
+	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(upstream, bufReader) // tunnel → upstream (via bufReader)
-		close(done)
+		tunnel.CloseWrite(upstream)
+		tunnel.CloseRead(tunnelConn)
+		done <- struct{}{}
 	}()
-	_, _ = io.Copy(tunnelConn, upstream) // upstream → tunnel
+	go func() {
+		_, _ = io.Copy(tunnelConn, upstream) // upstream → tunnel
+		tunnel.CloseWrite(tunnelConn)
+		tunnel.CloseRead(upstream)
+		done <- struct{}{}
+	}()
+	<-done
 	<-done
 
 	log.Debug("connection closed")

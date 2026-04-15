@@ -46,6 +46,7 @@ spec:
             - -sa-token-path={{ .Values.saTokenPath }}
             - -log-level={{ .Values.logLevel }}
             - -max-retry={{ .Values.maxRetryInterval }}
+            - -max-conns={{ .Values.maxConcurrentConnections }}
             - -health-addr=:{{ .Values.healthPort }}
             {{- if .Values.insecure }}
             - -insecure

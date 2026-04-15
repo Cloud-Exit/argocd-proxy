@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cloud-exit/argocd-cluster-proxy/pkg/agent"
+	"github.com/cloud-exit/argocd-cluster-proxy/pkg/tunnel"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -19,21 +20,22 @@ var version = "dev"
 
 func main() {
 	var (
-		serverURL       = flag.String("server", "", "proxy server WebSocket URL (e.g. wss://proxy:8080/connect)")
-		token           = flag.String("token", "", "authentication token (or TOKEN env var)")
-		targetAddr      = flag.String("target", "kubernetes.default.svc:443", "local Kubernetes API address")
-		caCertPath      = flag.String("ca-cert", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt", "path to CA cert for the local API")
-		insecure        = flag.Bool("insecure", false, "skip TLS verification to local API")
-		plainTarget     = flag.Bool("plain-target", false, "connect to target without TLS (for testing)")
-		saTokenPath     = flag.String("sa-token-path", "/var/run/secrets/kubernetes.io/serviceaccount/token", "path to ServiceAccount token for authenticating to the local K8s API (empty to disable)")
-		insecureServer  = flag.Bool("allow-insecure-server", false, "allow plaintext ws:// connection to the proxy server")
-		serverCACert    = flag.String("server-ca-cert", "", "path to CA cert for verifying the proxy server")
-		clientCert      = flag.String("client-cert", "", "path to client certificate for mTLS")
-		clientKey       = flag.String("client-key", "", "path to client private key for mTLS")
-		maxRetry        = flag.Duration("max-retry", 60*time.Second, "max reconnect backoff interval")
-		healthAddr      = flag.String("health-addr", ":8081", "address for health/metrics HTTP server (empty to disable)")
-		logLevel        = flag.String("log-level", "info", "log level")
-		showVersion     = flag.Bool("version", false, "print version and exit")
+		serverURL      = flag.String("server", "", "proxy server WebSocket URL (e.g. wss://proxy:8080/connect)")
+		token          = flag.String("token", "", "authentication token (or TOKEN env var)")
+		targetAddr     = flag.String("target", "kubernetes.default.svc:443", "local Kubernetes API address")
+		caCertPath     = flag.String("ca-cert", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt", "path to CA cert for the local API")
+		insecure       = flag.Bool("insecure", false, "skip TLS verification to local API")
+		plainTarget    = flag.Bool("plain-target", false, "connect to target without TLS (for testing)")
+		saTokenPath    = flag.String("sa-token-path", "/var/run/secrets/kubernetes.io/serviceaccount/token", "path to ServiceAccount token for authenticating to the local K8s API (empty to disable)")
+		insecureServer = flag.Bool("allow-insecure-server", false, "allow plaintext ws:// connection to the proxy server")
+		serverCACert   = flag.String("server-ca-cert", "", "path to CA cert for verifying the proxy server")
+		clientCert     = flag.String("client-cert", "", "path to client certificate for mTLS")
+		clientKey      = flag.String("client-key", "", "path to client private key for mTLS")
+		maxRetry       = flag.Duration("max-retry", 60*time.Second, "max reconnect backoff interval")
+		maxConns       = flag.Int("max-conns", tunnel.DefaultMaxConns, "max concurrent tunnel connections per session")
+		healthAddr     = flag.String("health-addr", ":8081", "address for health/metrics HTTP server (empty to disable)")
+		logLevel       = flag.String("log-level", "info", "log level")
+		showVersion    = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
 
@@ -67,18 +69,19 @@ func main() {
 	}
 
 	a, err := agent.New(agent.Config{
-		ServerURL:           *serverURL,
-		Token:               tok,
-		TargetAddr:          *targetAddr,
-		SATokenPath:         *saTokenPath,
-		CACertPath:          *caCertPath,
-		Insecure:            *insecure,
-		PlainTarget:         *plainTarget,
-		AllowInsecureServer: *insecureServer,
-		ServerCACertPath:    *serverCACert,
-		ClientCertPath:      *clientCert,
-		ClientKeyPath:       *clientKey,
-		MaxRetryInterval:    *maxRetry,
+		ServerURL:                *serverURL,
+		Token:                    tok,
+		TargetAddr:               *targetAddr,
+		SATokenPath:              *saTokenPath,
+		CACertPath:               *caCertPath,
+		Insecure:                 *insecure,
+		PlainTarget:              *plainTarget,
+		AllowInsecureServer:      *insecureServer,
+		ServerCACertPath:         *serverCACert,
+		ClientCertPath:           *clientCert,
+		ClientKeyPath:            *clientKey,
+		MaxRetryInterval:         *maxRetry,
+		MaxConcurrentConnections: *maxConns,
 	}, logger)
 	if err != nil {
 		logger.Error("init agent", "err", err)

@@ -2,6 +2,7 @@ package tunnel_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -180,6 +181,60 @@ func TestSessionMultipleConnections(t *testing.T) {
 		}
 	}
 
+	cancel()
+	wg.Wait()
+}
+
+func TestSessionRejectsWhenMaxConnectionsReached(t *testing.T) {
+	serverWS, clientWS, cleanup := wsConnPair(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	serverSess := tunnel.NewSession(serverWS, nil)
+	agentSess := tunnel.NewSession(clientWS, nil, tunnel.WithMaxConns(1))
+
+	release := make(chan struct{})
+	connected := make(chan struct{}, 1)
+
+	agentSess.OnConnect = func(sess *tunnel.Session, connID uint32, addr string) {
+		tunnelConn := sess.Accept(connID)
+		defer func() { _ = tunnelConn.Close() }()
+		if err := sess.SendConnected(connID); err != nil {
+			return
+		}
+		connected <- struct{}{}
+		<-release
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _ = serverSess.Serve(ctx) }()
+	go func() { defer wg.Done(); _ = agentSess.Serve(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := serverSess.Dial(ctx, "target:443")
+	if err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	select {
+	case <-connected:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for first connection")
+	}
+
+	_, err = serverSess.Dial(ctx, "target:443")
+	if !errors.Is(err, tunnel.ErrConnectFailed) {
+		t.Fatalf("second dial error = %v, want ErrConnectFailed", err)
+	}
+	if !strings.Contains(err.Error(), "too many connections") {
+		t.Fatalf("second dial error = %v, want too many connections detail", err)
+	}
+
+	close(release)
 	cancel()
 	wg.Wait()
 }

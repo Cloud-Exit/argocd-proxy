@@ -29,6 +29,9 @@ insecure: false
 # -- Max reconnection backoff interval.
 maxRetryInterval: "60s"
 
+# -- Max concurrent proxied requests per tunnel session.
+maxConcurrentConnections: 1024
+
 resources:
   requests:
     cpu: 25m

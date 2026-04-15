@@ -81,7 +81,7 @@ Kubernetes token rotation via projected volumes.
 - **Mandatory NetworkPolicy** — both charts deploy NetworkPolicy by default;
   the server's internal port is restricted to the ArgoCD namespace
 - **Distroless images** — non-root, read-only rootfs, all capabilities dropped
-- **Connection limits** — max 1024 concurrent tunnel connections per session
+- **Connection limits** — default 1024 concurrent tunnel connections per session, configurable on the agent
 - **Rate limiting** — optional per-server request throttling
 - **Pong timeout** — dead WebSocket peers detected and cleaned up within 45s
 
@@ -843,6 +843,7 @@ Clusters JSON format:
 | `-client-cert` | | | Client certificate for mTLS to the proxy server |
 | `-client-key` | | | Client private key for mTLS |
 | `-max-retry` | | `60s` | Max reconnect backoff |
+| `-max-conns` | | `1024` | Max concurrent tunnel connections per session |
 | `-health-addr` | | `:8081` | Health/metrics server address |
 | `-log-level` | | `info` | Log level |
 

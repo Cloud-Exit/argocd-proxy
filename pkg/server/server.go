@@ -375,12 +375,20 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request, cluster *
 		}
 	}
 
-	done := make(chan struct{})
+	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(tunnelConn, clientConn)
-		close(done)
+		tunnel.CloseWrite(tunnelConn)
+		tunnel.CloseRead(clientConn)
+		done <- struct{}{}
 	}()
-	_, _ = io.Copy(clientConn, tunnelConn)
+	go func() {
+		_, _ = io.Copy(clientConn, tunnelConn)
+		tunnel.CloseWrite(clientConn)
+		tunnel.CloseRead(tunnelConn)
+		done <- struct{}{}
+	}()
+	<-done
 	<-done
 
 	s.log.Info("proxy",

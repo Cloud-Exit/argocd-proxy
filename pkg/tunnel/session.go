@@ -19,9 +19,9 @@ type Session struct {
 	ws      *websocket.Conn
 	writeMu sync.Mutex
 
-	conns   sync.Map     // uint32 -> *Conn
-	nextID  atomic.Uint32
-	closed  chan struct{}
+	conns     sync.Map // uint32 -> *Conn
+	nextID    atomic.Uint32
+	closed    chan struct{}
 	closeOnce sync.Once
 
 	// OnConnect is called (agent side) for incoming connect requests.
@@ -43,8 +43,23 @@ type Session struct {
 // connections per session.
 const DefaultMaxConns = 1024
 
+// Option configures a Session.
+type Option func(*Session)
+
+// WithMaxConns sets the maximum number of concurrent incoming tunnel
+// connections handled by the session. Values <= 0 disable the limit.
+func WithMaxConns(max int) Option {
+	return func(s *Session) {
+		if max <= 0 {
+			s.connSem = nil
+			return
+		}
+		s.connSem = make(chan struct{}, max)
+	}
+}
+
 // NewSession wraps a WebSocket connection into a tunnel session.
-func NewSession(ws *websocket.Conn, logger *slog.Logger) *Session {
+func NewSession(ws *websocket.Conn, logger *slog.Logger, opts ...Option) *Session {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -53,6 +68,9 @@ func NewSession(ws *websocket.Conn, logger *slog.Logger) *Session {
 		closed:  make(chan struct{}),
 		connSem: make(chan struct{}, DefaultMaxConns),
 		log:     logger,
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	s.lastPong.Store(time.Now().UnixNano())
 	return s
@@ -96,14 +114,13 @@ func (s *Session) Serve(ctx context.Context) error {
 		switch msg.Type {
 		case MsgConnect:
 			if s.OnConnect != nil {
+				if s.connSem == nil {
+					s.startConnectHandler(msg.ConnID, string(msg.Data))
+					continue
+				}
 				select {
 				case s.connSem <- struct{}{}:
-					s.handlerWg.Add(1)
-					go func(id uint32, addr string) {
-						defer func() { <-s.connSem }()
-						defer s.handlerWg.Done()
-						s.OnConnect(s, id, addr)
-					}(msg.ConnID, string(msg.Data))
+					s.startConnectHandler(msg.ConnID, string(msg.Data))
 				default:
 					s.log.Warn("max concurrent connections reached, rejecting", "connID", msg.ConnID)
 					_ = s.SendError(msg.ConnID, "too many connections")
@@ -217,6 +234,17 @@ func (s *Session) Close() error {
 
 // Done returns a channel that is closed when the session is torn down.
 func (s *Session) Done() <-chan struct{} { return s.closed }
+
+func (s *Session) startConnectHandler(connID uint32, addr string) {
+	s.handlerWg.Add(1)
+	go func() {
+		defer s.handlerWg.Done()
+		if s.connSem != nil {
+			defer func() { <-s.connSem }()
+		}
+		s.OnConnect(s, connID, addr)
+	}()
+}
 
 func (s *Session) sendMsg(m Message) error {
 	s.writeMu.Lock()
