@@ -11,7 +11,7 @@ in the management cluster**.
 │                      Management Cluster                          │
 │                                                                  │
 │  ┌──────────┐   HTTP    ┌──────────────┐   WebSocket tunnel      │
-│  │  ArgoCD  │──────────▶│ proxy-server │◀───────────────────┐    │
+│  │  ArgoCD  │──────────▶│ proxy-server │◀──────────────────┐    │
 │  └──────────┘           └──────────────┘                    │    │
 │                          /tunnel/{id}/*                     │    │
 │                     (strips Authorization)                  │    │
@@ -24,7 +24,7 @@ in the management cluster**.
 │                      Customer Cluster (air-gapped)          │    │
 │                                                             │    │
 │  ┌─────────────┐   TLS    ┌──────────────────┐              │    │
-│  │  K8s API    │◀─────────│   proxy-agent    │──────────────┘    │
+│  │  K8s API    │◀─────────│   proxy-agent    │─────────────┘    │
 │  │  Server     │  + SA    │  (connects out)  │                   │
 │  └─────────────┘  token   └──────────────────┘                   │
 │                             Injects its own                      │
