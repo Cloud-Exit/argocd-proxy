@@ -96,10 +96,11 @@ const LivenessTimeout = 30 * time.Second
 // the local cluster, injecting its own ServiceAccount credentials so that no
 // customer cluster credentials need to exist on the management side.
 type Agent struct {
-	cfg       Config
-	tlsConfig *tls.Config
-	log       *slog.Logger
-	connected atomic.Bool
+	cfg               Config
+	tlsConfig         *tls.Config
+	upstreamTransport *http.Transport
+	log               *slog.Logger
+	connected         atomic.Bool
 
 	// lastConnectedTime tracks when the agent last had an active connection.
 	// Used by the liveness probe to restart if disconnected too long.
@@ -148,6 +149,7 @@ func New(cfg Config, logger *slog.Logger) (*Agent, error) {
 		}
 		a.tlsConfig = tc
 	}
+	a.upstreamTransport = a.buildUpstreamTransport()
 
 	return a, nil
 }
@@ -155,6 +157,8 @@ func New(cfg Config, logger *slog.Logger) (*Agent, error) {
 // Run connects to the proxy server and reconnects on failure. It blocks until
 // the context is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
+	defer a.upstreamTransport.CloseIdleConnections()
+
 	var attempt int
 	for {
 		select {
@@ -245,24 +249,6 @@ func (a *Agent) handleConnect(sess *tunnel.Session, connID uint32, addr string) 
 		return
 	}
 
-	var upstream net.Conn
-	var dialErr error
-
-	if a.cfg.PlainTarget {
-		upstream, dialErr = net.DialTimeout("tcp", addr, 10*time.Second)
-	} else {
-		upstream, dialErr = tls.DialWithDialer(
-			&net.Dialer{Timeout: 10 * time.Second},
-			"tcp", addr, a.tlsConfig,
-		)
-	}
-	if dialErr != nil {
-		log.Error("dial target", "err", dialErr)
-		_ = sess.SendError(connID, "dial failed")
-		return
-	}
-	defer func() { _ = upstream.Close() }()
-
 	tunnelConn := sess.Accept(connID)
 	defer func() { _ = tunnelConn.Close() }()
 
@@ -288,20 +274,58 @@ func (a *Agent) handleConnect(sess *tunnel.Session, connID uint32, addr string) 
 		log.Debug("SA token not available, forwarding without credentials", "err", tokenErr)
 	}
 
-	// Write the modified request to the upstream K8s API.
-	if err := req.Write(upstream); err != nil {
-		metrics.AgentUpstreamErrorsTotal.Inc()
-		log.Error("write request to upstream", "err", err)
-		return
-	}
-	// Close the request body to avoid leaking the reference.
+	// Close the request body after forwarding to avoid leaking the reference.
 	if req.Body != nil {
-		_ = req.Body.Close()
+		defer func() { _ = req.Body.Close() }()
 	}
 
-	// Pipe remaining data bidirectionally. For normal requests the response
-	// flows back; for upgrade requests (SPDY/WebSocket) additional frames
-	// are exchanged after the initial handshake.
+	if isUpgradeRequest(req) {
+		a.proxyUpgrade(log, req, bufReader, tunnelConn)
+		return
+	}
+
+	// The management-side transport closes each tunnel after one request, but
+	// the local API connection is safe to pool: every request still passes
+	// through this handler and receives the current ServiceAccount token.
+	req.URL.Scheme = "https"
+	if a.cfg.PlainTarget {
+		req.URL.Scheme = "http"
+	}
+	req.URL.Host = a.cfg.TargetAddr
+	req.Host = a.cfg.TargetAddr
+	req.RequestURI = ""
+	req.Close = false
+	req.Header.Del("Connection")
+
+	resp, err := a.upstreamTransport.RoundTrip(req)
+	if err != nil {
+		metrics.AgentUpstreamErrorsTotal.Inc()
+		log.Error("round trip target", "err", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := resp.Write(tunnelConn); err != nil {
+		metrics.AgentUpstreamErrorsTotal.Inc()
+		log.Error("write response to tunnel", "err", err)
+	}
+}
+
+func (a *Agent) proxyUpgrade(log *slog.Logger, req *http.Request, bufReader *bufio.Reader, tunnelConn net.Conn) {
+	upstream, err := a.dialTarget()
+	if err != nil {
+		metrics.AgentUpstreamErrorsTotal.Inc()
+		log.Error("dial upgrade target", "err", err)
+		return
+	}
+	defer func() { _ = upstream.Close() }()
+
+	if err := req.Write(upstream); err != nil {
+		metrics.AgentUpstreamErrorsTotal.Inc()
+		log.Error("write upgrade request to upstream", "err", err)
+		return
+	}
+
 	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(upstream, bufReader) // tunnel → upstream (via bufReader)
@@ -319,6 +343,48 @@ func (a *Agent) handleConnect(sess *tunnel.Session, connID uint32, addr string) 
 	<-done
 
 	log.Debug("connection closed")
+}
+
+func (a *Agent) dialTarget() (net.Conn, error) {
+	if a.cfg.PlainTarget {
+		return net.DialTimeout("tcp", a.cfg.TargetAddr, 10*time.Second)
+	}
+	return tls.DialWithDialer(
+		&net.Dialer{Timeout: 10 * time.Second},
+		"tcp", a.cfg.TargetAddr, a.tlsConfig,
+	)
+}
+
+func (a *Agent) buildUpstreamTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Cluster-internal traffic must never be routed through an environment proxy.
+	transport.Proxy = nil
+	transport.DialContext = (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.ForceAttemptHTTP2 = true
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 100
+	// Kubernetes API servers support HTTP/2, so one TLS connection can carry
+	// concurrent requests without triggering per-client connection-rate limits.
+	// Upgrade requests use proxyUpgrade and are not subject to this cap.
+	transport.MaxConnsPerHost = 1
+	if a.tlsConfig != nil {
+		transport.TLSClientConfig = a.tlsConfig.Clone()
+	}
+	return transport
+}
+
+func isUpgradeRequest(req *http.Request) bool {
+	for _, value := range req.Header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // readSAToken reads the Kubernetes ServiceAccount token from disk. It re-reads

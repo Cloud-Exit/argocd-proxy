@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,6 +109,167 @@ func TestEndToEndHTTPProxy(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "path=/api/v1/pods") {
 		t.Errorf("body: got %q, want to contain path=/api/v1/pods", string(body))
+	}
+}
+
+func TestProxyReusesAgentUpstreamConnection(t *testing.T) {
+	var upstreamConnections atomic.Int32
+	target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("X-Got-Auth", r.Header.Get("Authorization"))
+		w.Header().Set("X-Got-Body", string(body))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	target.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			upstreamConnections.Add(1)
+		}
+	}
+	target.Start()
+	defer target.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("first-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	targetAddr := strings.TrimPrefix(target.URL, "http://")
+	reg := server.NewRegistry([]server.ClusterConfig{
+		{ID: "pooled", Token: "agent-token", TargetAddr: targetAddr},
+	})
+	proxyServer := server.New(reg, nil)
+	ts := httptest.NewServer(proxyServer.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	a, err := agent.New(agent.Config{
+		ServerURL:           "ws" + strings.TrimPrefix(ts.URL, "http") + "/connect",
+		Token:               "agent-token",
+		TargetAddr:          targetAddr,
+		SATokenPath:         tokenFile,
+		PlainTarget:         true,
+		AllowInsecureServer: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	go func() { _ = a.Run(ctx) }()
+	waitForAgent(t, reg, 5*time.Second)
+
+	for i := 0; i < 5; i++ {
+		wantBody := strings.Repeat("x", i+1)
+		wantToken := "first-token"
+		if i == 1 {
+			if err := os.WriteFile(tokenFile, []byte("rotated-token"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if i >= 1 {
+			wantToken = "rotated-token"
+		}
+
+		req, requestErr := http.NewRequest(
+			http.MethodPost,
+			ts.URL+"/tunnel/pooled/api/v1/pods",
+			strings.NewReader(wantBody),
+		)
+		if requestErr != nil {
+			t.Fatalf("build request %d: %v", i, requestErr)
+		}
+		resp, requestErr := http.DefaultClient.Do(req)
+		if requestErr != nil {
+			t.Fatalf("request %d: %v", i, requestErr)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if got := resp.Header.Get("X-Got-Auth"); got != "Bearer "+wantToken {
+			t.Fatalf("request %d auth: got %q, want refreshed service-account token", i, got)
+		}
+		if got := resp.Header.Get("X-Got-Body"); got != wantBody {
+			t.Fatalf("request %d body: got %q, want %q", i, got, wantBody)
+		}
+	}
+
+	if got := upstreamConnections.Load(); got != 1 {
+		t.Fatalf("upstream connections: got %d, want 1", got)
+	}
+}
+
+func TestProxyMultiplexesConcurrentTLSUpstreamRequests(t *testing.T) {
+	var upstreamConnections atomic.Int32
+	var http2Requests atomic.Int32
+	target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 {
+			http2Requests.Add(1)
+		}
+		time.Sleep(25 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	target.EnableHTTP2 = true
+	target.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			upstreamConnections.Add(1)
+		}
+	}
+	target.StartTLS()
+	defer target.Close()
+
+	caPath := writePEM(t, t.TempDir(), "target-ca.crt", "CERTIFICATE", target.Certificate().Raw)
+	targetAddr := strings.TrimPrefix(target.URL, "https://")
+	reg := server.NewRegistry([]server.ClusterConfig{
+		{ID: "multiplexed", Token: "agent-token", TargetAddr: targetAddr},
+	})
+	proxyServer := server.New(reg, nil)
+	ts := httptest.NewServer(proxyServer.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	a, err := agent.New(agent.Config{
+		ServerURL:           "ws" + strings.TrimPrefix(ts.URL, "http") + "/connect",
+		Token:               "agent-token",
+		TargetAddr:          targetAddr,
+		CACertPath:          caPath,
+		SATokenPath:         filepath.Join(t.TempDir(), "missing-token"),
+		AllowInsecureServer: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	go func() { _ = a.Run(ctx) }()
+	waitForAgent(t, reg, 5*time.Second)
+
+	const requestCount = 20
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(requestCount)
+	for i := 0; i < requestCount; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			resp, requestErr := http.Get(ts.URL + "/tunnel/multiplexed/api/v1/pods")
+			if requestErr != nil {
+				t.Errorf("proxy request: %v", requestErr)
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("status: got %d, want 200", resp.StatusCode)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := http2Requests.Load(); got != requestCount {
+		t.Fatalf("HTTP/2 requests: got %d, want %d", got, requestCount)
+	}
+	if got := upstreamConnections.Load(); got != 1 {
+		t.Fatalf("upstream TLS connections: got %d, want 1", got)
 	}
 }
 
